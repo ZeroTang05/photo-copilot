@@ -64,16 +64,16 @@ SPEC 中 rendererVersion 为 pc-render-1 的算法定义项目数值语义。曝
 ## 目录设计
 
 ```text
-apps/web/src/app
-apps/web/src/features/import
-apps/web/src/features/editor
-apps/web/src/features/copilot
-apps/web/src/features/export
-apps/web/src/state
-apps/gateway/src/providers          # Provider 抽象与 createProvider 工厂
+apps/web/src/app/TopBar.tsx           # 顶部工具栏：导入/撤销/重做/对比/缩放/导出
+apps/web/src/app/ThumbnailSidebar.tsx # 左侧缩略图栏，支持多图会话切换
+apps/web/src/app/ControlsPanel.tsx    # 右侧参数面板（构图/光线/色彩/局部调整）
+apps/web/src/app/CopilotPanel.tsx     # 底部 AI 副驾面板
+apps/web/src/app/Slider.tsx           # 复用滑杆组件，支持 warmth/tint 渐变轨道
+apps/web/src/state/editor.ts          # Zustand store，多图状态与撤销/重做
+apps/gateway/src/providers            # Provider 抽象与 createProvider 工厂
 apps/gateway/src/providers/openai
 apps/gateway/src/providers/anthropic
-apps/gateway/src/planner            # planWithRepair 修复重试
+apps/gateway/src/planner              # planWithRepair 修复重试
 packages/domain/src
 packages/renderer/src
 packages/ai-contract/src
@@ -88,6 +88,10 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 原图 Blob、ImageBitmap、纹理和 Canvas 由资源管理对象持有，Zustand 保存资源 ID 和元数据，避免将大对象序列化到状态。每次替换照片释放旧纹理、撤销旧 Object URL 并关闭 ImageBitmap。
 
+### 多图会话
+
+`apps/web/src/state/editor.ts` 用 `ImageSlot[]` 跟踪当前会话的所有图片，每张图持有独立的 `EditState`、`history`、`future` 与缩略图（base64 data URL）。`activeIndex` 指向当前画布绑定的图片；commit / undo / redo / reset / candidate 操作只作用于 activeIndex 对应的那张。首次版本不跨图片同步状态；切换图片时 dispose 旧 PhotoRenderer 并 load 新 Blob，闪烁是已知可优化项。
+
 ## 模块公开契约
 
 | 模块 | 输入 | 输出及错误 |
@@ -100,8 +104,20 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 | planWithRepair | provider、调用输入、当前状态、allowComposition | 可预览计划或最后一次错误；解析或校验失败时按 SPEC 允许一次修复调用 |
 | createProvider | provider kind（openai \| anthropic）、密钥、端点、模型 | 实现统一 Provider 接口的实例 |
 | exportImage | 资源、冻结状态、尺寸与质量、取消信号 | JPEG Blob 与输出元数据 |
+| useEditor | 无 | Zustand store 钩子，导出 `images`、`activeIndex`、`candidate` 以及 `addImage` / `setActiveIndex` / `removeImage` / `commit` / `undo` / `redo` / `setCandidate` / `reset` |
 
 所有异步任务携带 imageId 和 generation。替换图片时增加 generation，旧任务完成时检查后丢弃资源和结果。renderPreview 每个动画帧取最新状态，避免为每次滑杆事件排队。
+
+## 编辑界面布局
+
+主屏采用三栏布局：`缩略图栏 \| 画布 \| 参数面板`，副驾面板只占据左下（不延伸至参数栏下方）。CSS Grid 关键约束：
+
+- `main`：`grid-template-rows: 56px 1fr`，顶部工具栏 56px，内容区占满
+- `.content`：`grid-template-columns: 1fr 320px`，左栈 + 右栏 3 栏
+- `.leftStack`：`grid-template-columns: 110px 1fr` + `grid-template-rows: minmax(0, 1fr) 240px`，缩略图跨两行、画布与副驾纵向分摊
+- `.controls`：`grid-row: 1 / span 2` 占据整个内容区高度
+
+参数面板按 SPEC 自有参数 + 设计图补充的"占位项"组织。`白色色阶`、`黑色色阶`、`自然饱和度`、`画笔`、`渐变`、`径向` 暂未在 `domain` schema 内，因此以禁用的"即将推出"占位控件呈现，等待参数加入 schema 后再启用。
 
 ## 部署设计
 
