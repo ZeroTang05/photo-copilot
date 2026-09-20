@@ -172,18 +172,25 @@ main {
   grid-row: 1 / span 2;
   background: #15181b;
   border-right: 1px solid var(--border);
-  padding: 14px 12px;
+  padding: 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* 内容溢出仅允许纵向滚动,且滚动条隐藏——侧栏不参与外部布局的滚动 */
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
   min-height: 0;
 }
 
+.thumbnails::-webkit-scrollbar { width: 0; height: 0; background: transparent; }
+
 .thumbnail {
   position: relative;
-  width: 86px;
-  height: 86px;
+  /* 跟随父列宽:列宽 110px 减去 padding 20px = 90px,再减去 border 2px = 88px;
+     用 width:100% 让内部图片始终与父列宽匹配,不再依赖 86px 硬编码 */
+  width: 100%;
+  aspect-ratio: 1 / 1;
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
@@ -221,8 +228,8 @@ main {
 }
 
 .thumbnail-empty {
-  width: 86px;
-  height: 86px;
+  width: 100%;
+  aspect-ratio: 1 / 1;
   border-radius: 8px;
   border: 1px dashed var(--border-strong);
   display: grid;
