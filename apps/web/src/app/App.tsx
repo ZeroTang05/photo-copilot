@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyChanges, changedSummary, createInitialState, type EditState, type GlobalKey, type PlanPayload } from '@photo-copilot/domain';
+import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
@@ -147,7 +147,7 @@ export function App() {
   const handleCompareStart = useCallback(() => {
     if (!state) return;
     setCompare(true);
-    rendererRef.current?.render({ ...state, global: { exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, warmth: 0, tint: 0, saturation: 0 }, regions: [] });
+    rendererRef.current?.render({ ...state, global: defaultGlobal(), regions: [] });
   }, [state]);
 
   const handleCompareEnd = useCallback(() => {

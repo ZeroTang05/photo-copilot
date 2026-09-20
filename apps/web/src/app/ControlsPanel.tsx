@@ -155,8 +155,36 @@ export function ControlsPanel(props: ControlsPanelProps) {
           onChange={(value) => props.onGlobalChange('shadows', value)}
           formatValue={(value) => formatSigned(value)}
         />
-        <DisabledPlaceholder label="白色色阶" />
-        <DisabledPlaceholder label="黑色色阶" />
+        <Slider
+          label="白色色阶"
+          value={state?.global.whites ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value) => props.onGlobalChange('whites', value)}
+          formatValue={(value) => formatSigned(value)}
+        />
+        <Slider
+          label="黑色色阶"
+          value={state?.global.blacks ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value) => props.onGlobalChange('blacks', value)}
+          formatValue={(value) => formatSigned(value)}
+        />
+        <Slider
+          label="清晰度"
+          value={state?.global.clarity ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value) => props.onGlobalChange('clarity', value)}
+          formatValue={(value) => formatSigned(value)}
+        />
       </details>
 
       {/* 色彩 */}
@@ -184,7 +212,16 @@ export function ControlsPanel(props: ControlsPanelProps) {
           onChange={(value) => props.onGlobalChange('tint', value)}
           formatValue={(value) => formatSigned(value)}
         />
-        <DisabledPlaceholder label="自然饱和度" />
+        <Slider
+          label="自然饱和度"
+          value={state?.global.vibrance ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value) => props.onGlobalChange('vibrance', value)}
+          formatValue={(value) => formatSigned(value)}
+        />
         <Slider
           label="饱和度"
           value={state?.global.saturation ?? 0}
