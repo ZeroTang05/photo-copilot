@@ -13,10 +13,13 @@ const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicBaseURL: process.env.ANTHROPIC_BASE_URL?.trim() || undefined,
   model: process.env.AI_MODEL ?? '',
-  secret: process.env.SESSION_SECRET ?? '',
-  codes: new Set((process.env.INVITE_CODES ?? '').split(',').map((code) => code.trim()).filter(Boolean)),
+  // SESSION_SECRET 用于签名会话 cookie。如果未配置,启动时自动生成一个随机
+  // 进程级秘钥——重启后旧 cookie 失效,但 AI 仍然可用(每次刷新会建新会话)。
+  // 正式部署应在 .env 中固定此值,避免会话表全部失效。
+  secret: process.env.SESSION_SECRET || randomUUID(),
   origin: process.env.ALLOWED_ORIGIN ?? 'http://localhost:5173',
   limit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT ?? 300),
+  perSessionLimit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT_PER_SESSION ?? 30),
 };
 
 const activeApiKey = config.provider === 'anthropic' ? config.anthropicApiKey : config.openaiApiKey;
@@ -26,14 +29,31 @@ const provider = createProvider(config.provider, { apiKey: activeApiKey, baseURL
 const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 3 * 1024 * 1024 });
 await app.register(cookie);
 const utcDay = () => new Date().toISOString().slice(0, 10);
-const sessions = new Map<string, { code: string; expiresAt: number; attempts: number; day: string; requestIds: Map<string, number> }>();
-const loginAttempts = new Map<string, number[]>(); let globalAttempts = 0; let globalDay = utcDay();
+const sessions = new Map<string, { id: string; expiresAt: number; attempts: number; day: string; requestIds: Map<string, number> }>();
+let globalAttempts = 0; let globalDay = utcDay();
 const resetCounters = () => { if (globalDay !== utcDay()) { globalDay=utcDay(); globalAttempts=0; } };
 const sign = (id: string) => createHmac('sha256', config.secret).update(id).digest('base64url');
 const cookieValue = (id: string) => `${id}.${sign(id)}`;
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const REQ_DEDUP_WINDOW_MS = 10 * 60 * 1000;
+
 function apiError(code: string, message: string, retryAfterSeconds: number | null = null) { return { code, message, retryAfterSeconds }; }
 function sameOrigin(request: { headers: Record<string, unknown> }) { const origin=request.headers.origin; return typeof origin === 'string' && origin === config.origin; }
-function getSession(raw?: string) { if (!raw || !config.secret) return; const dot=raw.lastIndexOf('.'); if(dot<1) return; const id=raw.slice(0,dot), sig=raw.slice(dot+1), expected=sign(id); if(sig.length!==expected.length || !timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return; const session=sessions.get(id); if(!session || session.expiresAt<Date.now()) return; return { id, session }; }
+function getSession(raw?: string) { if (!raw) return; const dot=raw.lastIndexOf('.'); if(dot<1) return; const id=raw.slice(0,dot), sig=raw.slice(dot+1), expected=sign(id); if(sig.length!==expected.length || !timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return; const session=sessions.get(id); if(!session || session.expiresAt<Date.now()) return; return { id, session }; }
+// 取得当前会话;若不存在则新建一个匿名会话并下发 cookie。
+// 移除邀请码门槛后,任何同源请求都会被自动签发 24 小时会话,速率限制仍按
+// 每会话 + 全局配额计数。
+function getOrCreateSession(rawCookie: string | undefined, reply: { setCookie: (name: string, value: string, opts: Record<string, unknown>) => void }, hostname: string) {
+  const existing = getSession(rawCookie);
+  if (existing) return existing;
+  const id = randomUUID();
+  const session = { id, expiresAt: Date.now() + SESSION_TTL_MS, attempts: 0, day: utcDay(), requestIds: new Map<string, number>() };
+  sessions.set(id, session);
+  reply.setCookie('pc_session', cookieValue(id), {
+    httpOnly: true, sameSite: 'strict', secure: !hostname.startsWith('localhost'), path: '/', maxAge: SESSION_TTL_MS / 1000,
+  });
+  return { id, session };
+}
 function jpegSize(base64: string) { const bytes=Buffer.from(base64,'base64'); if(bytes.length<4 || bytes[0]!==0xff || bytes[1]!==0xd8) throw new Error('分析图片必须是 JPEG'); let i=2; while(i<bytes.length){ if(bytes[i]!==0xff){i++;continue;} const marker=bytes[i+1]; const len=bytes.readUInt16BE(i+2); if(marker !== undefined && marker>=0xc0 && marker<=0xc3) return {width:bytes.readUInt16BE(i+5),height:bytes.readUInt16BE(i+7)}; i+=2+len; } throw new Error('JPEG 尺寸读取失败'); }
 
 const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用户指令、当前编辑状态和两张缩略图,返回 JSON 格式的候选编辑计划。
@@ -76,21 +96,24 @@ const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用�
 8. 输出大小适度,auto 模式曝光幅度通常 ≤ 0.7 EV
 9. 所有数组字段(observations、globalAssignments、regionUpserts、regionDeletes、reasons、limitations)即使为空也必须作为数组返回,不能省略字段、不能返回字符串或其他类型`;
 
-app.get('/api/session', async (request) => { const active=getSession(request.cookies.pc_session); return { authenticated: Boolean(active), remainingAttempts: active ? Math.max(0,30-active.session.attempts) : null, resetAt: active ? `${utcDay()}T24:00:00.000Z` : null }; });
-app.post('/api/session', async (request, reply) => {
-  if (!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
-  const body=request.body as { code?: string }; const code=body?.code?.trim(); const address=request.ip; const now=Date.now(); const recent=(loginAttempts.get(address)??[]).filter((time)=>now-time<60000); if(recent.length>=5) return reply.code(429).send(apiError('RATE_LIMITED','邀请代码尝试过于频繁',60)); recent.push(now); loginAttempts.set(address,recent);
-  if(!code || code.length>128 || !config.codes.has(code) || !config.secret) return reply.code(401).send(apiError('SESSION_REQUIRED','邀请代码无效'));
-  const id=randomUUID(); sessions.set(id,{code,expiresAt:now+86400000,attempts:0,day:utcDay(),requestIds:new Map()}); reply.setCookie('pc_session',cookieValue(id),{httpOnly:true,sameSite:'strict',secure:!request.hostname.startsWith('localhost'),path:'/',maxAge:86400}); return reply.code(204).send();
+app.get('/api/session', async (request, reply) => {
+  const active = getOrCreateSession(request.cookies.pc_session, reply, request.hostname);
+  return { authenticated: true, remainingAttempts: Math.max(0, config.perSessionLimit - active.session.attempts), resetAt: `${utcDay()}T24:00:00.000Z` };
 });
-app.delete('/api/session', async (request, reply) => { if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务')); const active=getSession(request.cookies.pc_session); if(active) sessions.delete(active.id); reply.clearCookie('pc_session',{path:'/'}); return reply.code(204).send(); });
+app.delete('/api/session', async (request, reply) => {
+  if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
+  const active = getSession(request.cookies.pc_session);
+  if(active) sessions.delete(active.id);
+  reply.clearCookie('pc_session', { path: '/' });
+  return reply.code(204).send();
+});
 app.post('/api/plan', async (request, reply) => {
   if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
-  const active=getSession(request.cookies.pc_session); if(!active) return reply.code(401).send(apiError('SESSION_REQUIRED','请先输入邀请代码'));
+  const active = getOrCreateSession(request.cookies.pc_session, reply, request.hostname);
   if(!activeApiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
   let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
-  const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<600000) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
-  resetCounters(); if(session.attempts>=30 || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
+  const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
+  resetCounters(); if(session.attempts>=config.perSessionLimit || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
   const started=Date.now();
   try {
     const { payload, result } = await planWithRepair(
