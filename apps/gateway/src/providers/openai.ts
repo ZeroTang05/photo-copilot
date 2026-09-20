@@ -4,11 +4,13 @@ import { ProviderError } from './types';
 
 // OpenAI Responses API provider.
 //
-// We deliberately use text.format.type: 'json_object' instead of
-// 'json_schema' (strict mode). Strict mode is honored only by OpenAI's own
-// models and is silently ignored by most OpenAI-compatible providers (DeepSeek,
-// Qwen, MiniMax, etc.). json_object guarantees valid JSON output; the Zod
-// schema in planner.ts validates structure.
+// Uses the generic json_object output mode (not strict mode). Strict
+// json_schema is honored only by OpenAI's own models and is silently
+// ignored by most OpenAI-compatible providers (DeepSeek, Qwen, MiniMax,
+// etc.); json_object guarantees valid JSON output while staying portable.
+// Structure is enforced by the Zod schema in planner.ts. The model is
+// told what to output via the generic system instructions; no provider-
+// specific tool or reasoning knobs are passed.
 
 export class OpenAIResponsesProvider implements Provider {
   readonly name: ProviderKind = 'openai';
@@ -31,7 +33,6 @@ export class OpenAIResponsesProvider implements Provider {
       response = await this.client.responses.create({
         model: this.cfg.model,
         store: false,
-        reasoning: { effort: 'low' },
         max_output_tokens: 6000,
         instructions: input.instructions,
         input: [{
@@ -46,7 +47,6 @@ export class OpenAIResponsesProvider implements Provider {
           ],
         }],
         text: { format: { type: 'json_object' } },
-        tools: [],
       });
     } catch (error) {
       throw new ProviderError('openai request failed', error);

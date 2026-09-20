@@ -36,9 +36,9 @@ function sameOrigin(request: { headers: Record<string, unknown> }) { const origi
 function getSession(raw?: string) { if (!raw || !config.secret) return; const dot=raw.lastIndexOf('.'); if(dot<1) return; const id=raw.slice(0,dot), sig=raw.slice(dot+1), expected=sign(id); if(sig.length!==expected.length || !timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return; const session=sessions.get(id); if(!session || session.expiresAt<Date.now()) return; return { id, session }; }
 function jpegSize(base64: string) { const bytes=Buffer.from(base64,'base64'); if(bytes.length<4 || bytes[0]!==0xff || bytes[1]!==0xd8) throw new Error('分析图片必须是 JPEG'); let i=2; while(i<bytes.length){ if(bytes[i]!==0xff){i++;continue;} const marker=bytes[i+1]; const len=bytes.readUInt16BE(i+2); if(marker !== undefined && marker>=0xc0 && marker<=0xc3) return {width:bytes.readUInt16BE(i+5),height:bytes.readUInt16BE(i+7)}; i+=2+len; } throw new Error('JPEG 尺寸读取失败'); }
 
-const instructions = `你是 Photo Copilot 的照片编辑规划器。每次请求必须通过调用 submit_edit_plan 工具返回结构化计划,不要输出任何其他文本。
+const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用户指令、当前编辑状态和两张缩略图,返回 JSON 格式的候选编辑计划。
 
-[submit_edit_plan 参数契约]
+[输出契约 - 必须严格匹配的 JSON 字段]
 - status: 必填,枚举 "plan" | "clarify" | "unsupported"
 - observations: 字符串数组,最多 3 项,每项最多 160 字符
 - message: 字符串,最多 300 字符
