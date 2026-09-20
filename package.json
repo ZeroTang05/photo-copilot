@@ -1,0 +1,16 @@
+{
+  "name": "photo-copilot",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "scripts": {
+    "dev": "pnpm --filter @photo-copilot/domain build && pnpm --filter @photo-copilot/renderer build && pnpm --filter @photo-copilot/ai-contract build && pnpm --filter @photo-copilot/web dev",
+    "dev:gateway": "pnpm --filter @photo-copilot/domain build && pnpm --filter @photo-copilot/ai-contract build && pnpm --filter @photo-copilot/gateway dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @photo-copilot/domain test"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2",
+    "typescript": "5.9.2"
+  }
+}
