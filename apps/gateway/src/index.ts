@@ -2,7 +2,7 @@ import cookie from '@fastify/cookie';
 import Fastify from 'fastify';
 import OpenAI from 'openai';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import { PlanRequestSchema, PlanResponseSchema, planJsonSchema } from '@photo-copilot/ai-contract';
+import { PlanRequestSchema, PlanResponseSchema, planPayloadJsonSchema } from '@photo-copilot/ai-contract';
 import { PlanPayloadSchema, validatePlan } from '@photo-copilot/domain';
 
 const config = {
@@ -48,7 +48,7 @@ app.post('/api/plan', async (request, reply) => {
   try {
     const response=await client.responses.create({ model:config.model, store:false, reasoning:{effort:'low'}, max_output_tokens:6000, instructions,
       input:[{role:'user',content:[{type:'input_text',text:JSON.stringify({...parsed, originalPreview:{...parsed.originalPreview,base64:'omitted'},currentPreview:{...parsed.currentPreview,base64:'omitted'}})}, {type:'input_image',image_url:`data:image/jpeg;base64,${parsed.originalPreview.base64}`,detail:'high'}, {type:'input_image',image_url:`data:image/jpeg;base64,${parsed.currentPreview.base64}`,detail:'high'}]}],
-      text:{format:{type:'json_schema',name:'photo_edit_plan',strict:true,schema:planJsonSchema as never}}, tools:[],
+      text:{format:{type:'json_schema',name:'photo_edit_plan',strict:true,schema:planPayloadJsonSchema as never}}, tools:[],
     });
     if(response.status!=='completed' || !response.output_text) return reply.code(502).send(apiError('MODEL_INCOMPLETE','本次建议未生成完整结果'));
     let payload;

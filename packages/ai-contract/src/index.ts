@@ -20,3 +20,5 @@ export const planJsonSchema = {
     changes: { type: ['object','null'] }, reasons: { type: 'array', maxItems: 16, items: { type: 'object' } }, limitations: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 160 } },
   },
 } as const;
+
+export const planPayloadJsonSchema = z.toJSONSchema(PlanPayloadSchema, { target: 'draft-2020-12' }) as Record<string, unknown>;
