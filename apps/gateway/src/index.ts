@@ -43,14 +43,27 @@ const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用�
 - observations: 字符串数组,最多 3 项,每项最多 160 字符
 - message: 字符串,最多 300 字符
 - changes: 当 status="plan" 时必填;其余状态传 null
-  - globalAssignments: 数组,最多 7 项,每项 { parameter, value },无修改时必须返回 []
-    - parameter 枚举: exposureEV | contrast | highlights | shadows | warmth | tint | saturation
+  - globalAssignments: 数组,最多 11 项,每项 { parameter, value },无修改时必须返回 []
+    - parameter 枚举: exposureEV | contrast | highlights | shadows | whites | blacks | clarity | warmth | tint | vibrance | saturation
     - value 是绝对目标值,exposureEV ∈ [-2, 2],其余 ∈ [-100, 100]
   - transform: Transform 对象或 null
   - regionUpserts: 数组,最多 4 项(已有 id 表示更新,新 id 表示创建),无变更时必须返回 []
   - regionDeletes: UUID 字符串数组,最多 4 项,无删除时必须返回 []
 - reasons: 数组,最多 16 项,每项 { target, observation, intent },target 必须是 "global.<参数>" | "transform" | "region.<UUID>"
 - limitations: 字符串数组,最多 3 项,每项最多 160 字符
+
+[参数语义 - 11 个全局可调参数的作用与典型用法]
+- exposureEV 曝光:线性增益,正数提亮整个画面,负数压暗;范围 ±2 EV。一般"整体更亮一点"调这里。
+- contrast 对比度:围绕中间灰的对比度曲线斜率,正数加强反差,负数变柔和。
+- highlights 高光:仅影响直方图顶部约 25%。负值找回过曝细节;正值推得更亮。
+- shadows 阴影:仅影响直方图底部约 25%。负值加深;正值提亮暗部,适合"暗部细节看不见"。
+- whites 白色色阶:调整白点(高端映射锚点)。负值压白,正值提白。常用于"高光更通透"。
+- blacks 黑色色阶:调整黑点(低端映射锚点)。正值加深黑;负值提黑。常用于"阴影更沉"或"黑位不够黑"。
+- clarity 清晰度:中间调边缘对比度。正值加锐利通透感;负值柔化。常用于"让画面更通透"或"皮肤更柔"。
+- warmth 色温:暖↔冷。负值偏冷蓝,正值偏暖橙。范围 ±100,等价于 Lightroom 的 2000K~50000K 区间被压缩到 ±100。
+- tint 色调:绿↔品红。负值偏绿,正值偏品红。配合 warmth 修正非中性白平衡。
+- vibrance 自然饱和度:非线性饱和度,优先提升低饱和色,对肤色和已饱和色更柔和。常用于"画面更鲜亮但不要过"。
+- saturation 饱和度:线性饱和度,正负对所有颜色同等放大或缩小。
 
 [行为规则]
 1. value 是当前状态之上的绝对目标值,不是相对增量
