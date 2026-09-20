@@ -6,6 +6,16 @@ AI 负责理解照片和编辑意图，返回受限动作空间中的候选计�
 
 首版配置 gpt-5.6-terra，reasoning.effort 使用 low。请求使用 Responses API、图像输入和严格结构化输出，store 设为 false，禁用所有工具，max_output_tokens 初始设为 6000。该预算需要 G0 的真实调用校准，截断输出按失败处理。
 
+网关通过 OpenAI 兼容 SDK 调用模型。任何兼容 OpenAI Chat / Responses 接口的服务都可接入，通过环境变量切换：
+
+| 环境变量 | 用途 | 默认 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | 上游 API 密钥 | 必填 |
+| `OPENAI_BASE_URL` | 上游服务根地址，未设置时走 OpenAI 官方 `https://api.openai.com/v1` | 可选 |
+| `AI_MODEL` | 实际调用的模型 ID | `gpt-5.6-terra` |
+
+切换示例：Azure OpenAI 设 `OPENAI_BASE_URL=https://{resource}.openai.azure.com/openai/deployments/{deployment}`；DeepSeek 设 `OPENAI_BASE_URL=https://api.deepseek.com/v1`；自托管 vLLM / Ollama 同样填入兼容端点即可。模型 ID 必须与所选厂商的能力匹配，并支持结构化输出与图像输入；切换后需重新校准 max_output_tokens预算与黄金场景。
+
 所选模型的图像与结构化输出能力见 [模型官方文档](https://developers.openai.com/api/docs/models/gpt-5.6-terra)。输入格式见 [图像理解指南](https://developers.openai.com/api/docs/guides/images-vision)，输出约束见 [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)。官方资料同时提示精确空间定位存在局限，因此区域选择必须允许修正。
 
 ## 一次完整请求

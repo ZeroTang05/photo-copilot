@@ -6,8 +6,13 @@ import { PlanRequestSchema, PlanResponseSchema, planJsonSchema } from '@photo-co
 import { PlanPayloadSchema, validatePlan } from '@photo-copilot/domain';
 
 const config = {
-  apiKey: process.env.OPENAI_API_KEY, model: process.env.AI_MODEL ?? 'gpt-5.6-terra', secret: process.env.SESSION_SECRET ?? '',
-  codes: new Set((process.env.INVITE_CODES ?? '').split(',').map((code) => code.trim()).filter(Boolean)), origin: process.env.ALLOWED_ORIGIN ?? 'http://localhost:5173', limit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT ?? 300),
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
+  model: process.env.AI_MODEL ?? 'gpt-5.6-terra',
+  secret: process.env.SESSION_SECRET ?? '',
+  codes: new Set((process.env.INVITE_CODES ?? '').split(',').map((code) => code.trim()).filter(Boolean)),
+  origin: process.env.ALLOWED_ORIGIN ?? 'http://localhost:5173',
+  limit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT ?? 300),
 };
 const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 3 * 1024 * 1024 });
 await app.register(cookie);
@@ -38,7 +43,7 @@ app.post('/api/plan', async (request, reply) => {
   let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
   const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<600000) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
   resetCounters(); if(session.attempts>=30 || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
-  const started=Date.now(); const client=new OpenAI({apiKey:config.apiKey,maxRetries:0,timeout:30000});
+  const started=Date.now(); const client=new OpenAI({apiKey:config.apiKey,...(config.baseURL?{baseURL:config.baseURL}:{}),maxRetries:0,timeout:30000});
   try {
     const response=await client.responses.create({ model:config.model, store:false, reasoning:{effort:'low'}, max_output_tokens:6000, instructions,
       input:[{role:'user',content:[{type:'input_text',text:JSON.stringify({...parsed, originalPreview:{...parsed.originalPreview,base64:'omitted'},currentPreview:{...parsed.currentPreview,base64:'omitted'}})}, {type:'input_image',image_url:`data:image/jpeg;base64,${parsed.originalPreview.base64}`,detail:'high'}, {type:'input_image',image_url:`data:image/jpeg;base64,${parsed.currentPreview.base64}`,detail:'high'}]}],
