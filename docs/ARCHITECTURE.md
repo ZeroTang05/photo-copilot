@@ -123,9 +123,9 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 本地开发使用 Vite，代理同源 API 到 Fastify。邀请环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
 
-服务端必需配置 `AI_PROVIDER`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`（按 provider 取对应密钥）、`OPENAI_BASE_URL` 或 `ANTHROPIC_BASE_URL`（可选，覆盖默认上游）、`AI_MODEL`、`SESSION_SECRET`、`INVITE_CODES`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`AI_PROVIDER` 默认 `openai`；OpenAI 路径默认模型 `gpt-4o-mini`，Anthropic 路径必须显式指定 `AI_MODEL`。每个邀请每天最多 30 次上游尝试，每分钟最多 5 次。缺少凭据时启动诊断显示 AI 不可用，手动编辑页面可以运行。
+服务端必需配置 `AI_PROVIDER`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`(按 provider 取对应密钥)、`OPENAI_BASE_URL` 或 `ANTHROPIC_BASE_URL`(可选,覆盖默认上游)、`AI_MODEL`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`SESSION_SECRET` 用于签名会话 cookie;若不配置,启动时自动生成进程级随机值,每次重启会让旧 cookie 失效,但 AI 仍然可用。`AI_PROVIDER` 默认 `openai`;OpenAI 路径默认模型 `gpt-4o-mini`,Anthropic 路径必须显式指定 `AI_MODEL`。每个匿名会话每天最多 30 次上游尝试,全局每天最多 300 次。缺少凭据时启动诊断显示 AI 不可用,手动编辑页面可以运行。
 
-邀请代码和会话标识只存在服务端与 HttpOnly Cookie 通道。进程内计数重启会清零，首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储，该项是架构扩展门槛。
+会话标识只存在服务端与 HttpOnly Cookie 通道。首版无邀请码门槛:任何同源请求都自动签发 24 小时匿名会话,会话内按上述速率限制计数。进程内计数重启会清零,首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储,该项是架构扩展门槛。
 
 部署目标为普通 Node 容器环境。首版所需服务为静态文件、同源 API 和上游模型接口。
 
