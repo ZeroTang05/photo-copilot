@@ -29,8 +29,8 @@ AI 的输出进入校验器与候选区。应用建议后，确定性的状态 r
 | 解码编码 | createImageBitmap、Canvas 2D、Blob | 使用浏览器真实解码与 JPEG 编码能力 |
 | 请求与校验 | fetch、AbortController、Zod | 同一套领域 Schema 供浏览器与网关校验 |
 | 服务端 | Node.js 24 LTS、Fastify | 同源静态文件与少量 API，便于本地及单实例托管 |
-| 模型 SDK | OpenAI 官方 JavaScript SDK、Responses API | 图像输入加严格结构化输出 |
-| 初始模型 | gpt-5.6-terra，低推理强度 | 官方资料支持图像输入及结构化输出，实际质量由 G0 决定 |
+| 模型 SDK | OpenAI 官方 JavaScript SDK（Responses API）、`@anthropic-ai/sdk`（Messages API） | 通过 `AI_PROVIDER` 选择；OpenAI 路径用 `text.format.type: 'json_object'`，Anthropic 路径强制调用 `submit_edit_plan` 工具并以 `input_schema` 约束输入 |
+| 初始模型 | 取决于 `AI_PROVIDER`：OpenAI 路径默认 `gpt-4o-mini`，Anthropic 路径由 `AI_MODEL` 显式指定 | 模型 ID 必须与所选 provider 能力匹配，切换后重新校准 max_output_tokens 与黄金场景 |
 | 依赖管理 | pnpm workspace | 两个应用和三个内聚包共享类型 |
 | 验证 | Vitest、Playwright、真实桌面浏览器 | 领域不变量、网络契约和实际渲染分别验证 |
 | 持久化 | 首版无编辑持久化，网关采用进程内邀请会话与计数器 | 邀请试用单实例，后续扩容再引入持久共享存储 |
@@ -70,9 +70,10 @@ apps/web/src/features/editor
 apps/web/src/features/copilot
 apps/web/src/features/export
 apps/web/src/state
-apps/gateway/src/routes
-apps/gateway/src/session
-apps/gateway/src/planner
+apps/gateway/src/providers          # Provider 抽象与 createProvider 工厂
+apps/gateway/src/providers/openai
+apps/gateway/src/providers/anthropic
+apps/gateway/src/planner            # planWithRepair 修复重试
 packages/domain/src
 packages/renderer/src
 packages/ai-contract/src
@@ -96,7 +97,8 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 | validatePlan | 请求上下文、模型计划 | 可预览计划或具名业务错误 |
 | renderPreview | 资源、状态、视口 | 当前帧，失败时报告 GPU 错误 |
 | buildAnalysisImages | 资源、已提交状态 | 原图与当前效果 JPEG Blob，固定原图坐标 |
-| requestPlan | 已校验请求、取消信号 | plan、clarify 或 unsupported 之一 |
+| planWithRepair | provider、调用输入、当前状态、allowComposition | 可预览计划或最后一次错误；解析或校验失败时按 SPEC 允许一次修复调用 |
+| createProvider | provider kind（openai \| anthropic）、密钥、端点、模型 | 实现统一 Provider 接口的实例 |
 | exportImage | 资源、冻结状态、尺寸与质量、取消信号 | JPEG Blob 与输出元数据 |
 
 所有异步任务携带 imageId 和 generation。替换图片时增加 generation，旧任务完成时检查后丢弃资源和结果。renderPreview 每个动画帧取最新状态，避免为每次滑杆事件排队。
@@ -105,7 +107,7 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 本地开发使用 Vite，代理同源 API 到 Fastify。邀请环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
 
-服务端必需配置 OPENAI_API_KEY、AI_MODEL、SESSION_SECRET、INVITE_CODES、ALLOWED_ORIGIN 和 DAILY_AI_ATTEMPT_LIMIT。默认 AI_MODEL 为 gpt-5.6-terra，每个邀请每天最多 30 次上游尝试，每分钟最多 5 次。缺少凭据时启动诊断显示 AI 不可用，手动编辑页面可以运行。
+服务端必需配置 `AI_PROVIDER`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`（按 provider 取对应密钥）、`OPENAI_BASE_URL` 或 `ANTHROPIC_BASE_URL`（可选，覆盖默认上游）、`AI_MODEL`、`SESSION_SECRET`、`INVITE_CODES`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`AI_PROVIDER` 默认 `openai`；OpenAI 路径默认模型 `gpt-4o-mini`，Anthropic 路径必须显式指定 `AI_MODEL`。每个邀请每天最多 30 次上游尝试，每分钟最多 5 次。缺少凭据时启动诊断显示 AI 不可用，手动编辑页面可以运行。
 
 邀请代码和会话标识只存在服务端与 HttpOnly Cookie 通道。进程内计数重启会清零，首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储，该项是架构扩展门槛。
 
