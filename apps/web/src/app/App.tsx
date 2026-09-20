@@ -81,9 +81,6 @@ export function App() {
   const [allowComposition, setAllowComposition] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [session, setSession] = useState<boolean>();
-  const [invite, setInvite] = useState('');
-  const [showInvite, setShowInvite] = useState(false);
   const [compare, setCompare] = useState(false);
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
@@ -116,10 +113,6 @@ export function App() {
     window.addEventListener('resize', handler);
     return () => window.removeEventListener('resize', handler);
   }, [draw]);
-
-  useEffect(() => {
-    fetch('/api/session').then((r) => r.json()).then((value) => setSession(value.authenticated)).catch(() => setSession(false));
-  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -225,7 +218,6 @@ export function App() {
 
   const requestPlan = async (mode: 'auto' | 'followup') => {
     if (!state || !currentSlot || candidate) return;
-    if (!session) { setShowInvite(true); setStatus('输入邀请代码后可以使用 AI'); return; }
     if (mode === 'followup' && !instruction.trim()) { setStatus('请输入希望修改的内容'); return; }
     try {
       controllerRef.current?.abort();
@@ -308,12 +300,6 @@ export function App() {
     }
   };
 
-  const handleLogin = async () => {
-    const response = await fetch('/api/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: invite }) });
-    if (response.ok) { setSession(true); setShowInvite(false); setStatus('邀请会话已建立'); }
-    else setStatus('邀请代码无效或当前服务未配置');
-  };
-
   return (
     <main onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void handleImport(file); }}>
       <TopBar
@@ -375,17 +361,6 @@ export function App() {
           regionCount={state?.regions.length ?? 0}
         />
       </section>
-      {showInvite && (
-        <div className="modal">
-          <div>
-            <h2>输入邀请代码</h2>
-            <p>AI 建议需要邀请会话。本地编辑与导出无需联网。</p>
-            <input value={invite} onChange={(event) => setInvite(event.target.value)} autoFocus />
-            <button className="primary" onClick={() => void handleLogin()}>继续</button>
-            <button onClick={() => setShowInvite(false)}>关闭</button>
-          </div>
-        </div>
-      )}
     </main>
   );
 }
