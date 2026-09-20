@@ -179,7 +179,7 @@ model 为实际使用的模型 ID，promptVersion 初始为 pc-planner-1。paylo
 | HTTP | code | 客户端行为 |
 | --- | --- | --- |
 | 400 | REQUEST_INVALID | 显示输入错误，禁止自动重试 |
-| 401 | SESSION_REQUIRED | 打开邀请入口 |
+| 401 | SESSION_REQUIRED | 当前不会触发(网关自动签发);保留作为未来账户/设备鉴权入口 |
 | 403 | ORIGIN_DENIED | 显示当前来源无法使用服务 |
 | 409 | REQUEST_DUPLICATE | 保持原请求状态，提示操作已提交 |
 | 413 | REQUEST_TOO_LARGE | 显示分析图片超过发送限制 |
@@ -192,15 +192,15 @@ model 为实际使用的模型 ID，promptVersion 初始为 pc-planner-1。paylo
 
 过期响应属于客户端 STALE_RESULT，不代表服务端失败。它必须被丢弃，不能通过修改 baseRevision 强行应用。
 
-## 邀请会话与数据边界
+## 匿名会话与数据边界
 
-POST /api/session 接收 code 字符串，长度 1 至 128，使用服务端配置的邀请代码建立随机会话。成功 HTTP 204，并设置 HttpOnly、Secure、SameSite Strict 的 Cookie，期限为 24 小时。开发环境仅允许 loopback 地址使用非 Secure Cookie。错误代码不透露有效邀请名单。
+首版无邀请码门槛:任何同源请求都由网关自动签发 24 小时匿名会话(随机 UUID,HMAC 签名 cookie)。GET /api/session 在缺失 cookie 时直接创建并下发,始终返回 `authenticated: true`。POST /api/session 已删除;DELETE /api/session 撤销当前会话并清 cookie。
 
-DELETE /api/session 撤销当前会话并返回 HTTP 204。GET /api/session 返回 HTTP 200，包含 authenticated 布尔值、remainingAttempts 非负整数或 null、resetAt ISO 8601 UTC 字符串或 null。未认证时后两项为 null。remainingAttempts 表示邀请身份剩余日额度，全局限额在请求时另行检查。邀请创建和退出均验证 Origin，所有修改类接口接受同源 JSON 请求，拒绝缺失或不匹配的生产 Origin。DELETE 请求发送空 JSON 对象。
+Cookie 属性:HttpOnly + SameSite=Strict;Secure 仅在非 loopback 主机上启用,确保生产 HTTPS 下不会被中间人读取。剩余日额度由会话级 `DAILY_AI_ATTEMPT_LIMIT_PER_SESSION`(默认 30)限制;全局每天 `DAILY_AI_ATTEMPT_LIMIT`(默认 300)由网关进程计数,与单会话无关。所有接口均要求同源 Origin,生产域不匹配返回 403。
 
-邀请代码每分钟最多尝试 5 次，按服务端可信来源地址计数。上游配额按邀请身份计数，多个会话共享。每日配额在 UTC 零点重置，界面转换为本地时间。整个服务额外设置全局每日上游尝试限制，默认 300 次。
+每日配额在 UTC 零点重置,界面按本地时区显示。进程重启会清零所有内存中的会话与配额计数,生产部署需要持久化或外部计数。
 
-应用日志不保存图片 base64、用户输入、模型正文、文件名、EXIF、Cookie、邀请代码或密钥。仅保留请求随机 ID、状态码、耗时、模型版本和用量，运行日志滚动保留 7 天。
+应用日志不保存图片 base64、用户输入、模型正文、文件名、EXIF、Cookie 内容或密钥。仅保留请求随机 ID、状态码、耗时、模型版本与用量,运行日志滚动保留 7 天。
 
 网关请求体日志与反向代理请求体采集必须关闭。图片正文仅存在请求内存中，请求结束后解除引用。发送说明采用准确表述，原始文件留在浏览器，缩略图、输入文字和编辑参数发送至模型服务。
 

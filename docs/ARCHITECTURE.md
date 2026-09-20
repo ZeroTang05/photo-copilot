@@ -2,7 +2,7 @@
 
 ## ADR-01 前端主导的执行边界
 
-浏览器承担解码、参数状态、图像渲染、候选预览、历史和导出。服务端承担邀请会话、请求校验、配额和模型调用。服务端不接收原始文件，不参与成片计算，不建立照片资产库。
+浏览器承担解码、参数状态、图像渲染、候选预览、历史和导出。服务端承担匿名会话、请求校验、配额和模型调用。服务端不接收原始文件，不参与成片计算，不建立照片资产库。
 
 AI 的输出进入校验器与候选区。应用建议后，确定性的状态 reducer 产生新状态，渲染器读取状态完成画面更新。
 
@@ -23,7 +23,7 @@ AI 的输出进入校验器与候选区。应用建议后，确定性的状态 r
 | 层 | 选择 | 理由与边界 |
 | --- | --- | --- |
 | 前端 | React 19.3、TypeScript 严格模式、Vite 8 | 单页工作台无需服务端渲染，类型契约贯穿前后端 |
-| 样式 | CSS Modules、CSS 变量、原生语义控件 | 控制中性色彩和布局，减少无关组件框架依赖 |
+| 样式 | CSS Modules、CSS 变量、原生语义控件 | 控制中性色彩和布局,减少无关组件框架依赖。滚动条自定义为 4px 细线 + 主题色 (`--border-strong` + `--text-faint` hover),track 透明,避免默认 12px 灰条与暗色界面对比突兀 |
 | 状态 | Zustand 加纯 reducer | React 订阅界面状态，事务逻辑独立于视图 |
 | 图形 | 原生 WebGL2、GLSL ES 3.00 | 自有参数需要固定像素语义，单张图片管线较短 |
 | 解码编码 | createImageBitmap、Canvas 2D、Blob | 使用浏览器真实解码与 JPEG 编码能力 |
@@ -33,7 +33,7 @@ AI 的输出进入校验器与候选区。应用建议后，确定性的状态 r
 | 初始模型 | 取决于 `AI_PROVIDER`：OpenAI 路径默认 `gpt-4o-mini`，Anthropic 路径由 `AI_MODEL` 显式指定 | 模型 ID 必须与所选 provider 能力匹配，切换后重新校准 max_output_tokens 与黄金场景 |
 | 依赖管理 | pnpm workspace | 两个应用和三个内聚包共享类型 |
 | 验证 | Vitest、Playwright、真实桌面浏览器 | 领域不变量、网络契约和实际渲染分别验证 |
-| 持久化 | 首版无编辑持久化，网关采用进程内邀请会话与计数器 | 邀请试用单实例，后续扩容再引入持久共享存储 |
+| 持久化 | 首版无编辑持久化,网关采用进程内匿名会话与计数器 | 单实例开放试用,后续扩容再引入持久共享存储 |
 
 [React 官方版本页](https://react.dev/versions) 在资料核验时列出 19.3。[Vite 官方指南](https://vite.dev/guide/) 给出运行时最低要求，Node.js 24 LTS 满足该要求。[Node.js 发布页](https://nodejs.org/en/about/previous-releases) 用于开发启动时再次确认支持周期。其余依赖在 G0 选择当时兼容的稳定版本并固定到 lockfile，记录精确版本，禁止依赖未固定的 latest 部署。
 
@@ -121,13 +121,19 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 ## 部署设计
 
-本地开发使用 Vite，代理同源 API 到 Fastify。邀请环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
+本地开发使用 Vite，代理同源 API 到 Fastify。生产环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
 
 服务端必需配置 `AI_PROVIDER`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`(按 provider 取对应密钥)、`OPENAI_BASE_URL` 或 `ANTHROPIC_BASE_URL`(可选,覆盖默认上游)、`AI_MODEL`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`SESSION_SECRET` 用于签名会话 cookie;若不配置,启动时自动生成进程级随机值,每次重启会让旧 cookie 失效,但 AI 仍然可用。`AI_PROVIDER` 默认 `openai`;OpenAI 路径默认模型 `gpt-4o-mini`,Anthropic 路径必须显式指定 `AI_MODEL`。每个匿名会话每天最多 30 次上游尝试,全局每天最多 300 次。缺少凭据时启动诊断显示 AI 不可用,手动编辑页面可以运行。
 
 会话标识只存在服务端与 HttpOnly Cookie 通道。首版无邀请码门槛:任何同源请求都自动签发 24 小时匿名会话,会话内按上述速率限制计数。进程内计数重启会清零,首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储,该项是架构扩展门槛。
 
 部署目标为普通 Node 容器环境。首版所需服务为静态文件、同源 API 和上游模型接口。
+
+## 开发约定
+
+`tmp/`(含 `tmp/photo/`)是手动测试和调试验证过程的中间产物目录——例如截图、对照图、调试输出。该目录被 `.gitignore` 忽略,不进入版本库。`pnpm dev` 不会自动清理;调试完成可由开发者手动清理或保留作记录。
+
+`packages/*` 的 `exports.import` 指向编译产物 `dist/index.js`。修改 `src/` 后必须 `pnpm --filter @photo-copilot/<pkg> build` 把改动同步到 dist,否则 Vite dev 仍服务旧版源码。这一点在 `packages/renderer/src/index.ts` 顶部的注释中有提醒。
 
 ## 成本与维护
 

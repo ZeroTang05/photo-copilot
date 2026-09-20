@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | FR-01 | apps/web/src/app/App.tsx | 真实 JPEG 与 PNG 选择、尺寸限制、浏览器解码和白底规范化已完成 |
 | FR-02 至 FR-04 | apps/web/src/app/App.tsx 与 packages/renderer/src/index.ts | WebGL2 画布、缩放、全局参数、调平和裁切字段已完成 |
-| FR-05 至 FR-08 | apps/gateway/src/index.ts 与 apps/web/src/app/App.tsx | 邀请会话、严格模型计划、候选预览和解释卡已完成 |
+| FR-05 至 FR-08 | apps/gateway/src/index.ts 与 apps/web/src/app/App.tsx | 匿名会话、严格模型计划、候选预览和解释卡已完成 |
 | FR-07 | apps/web/src/app/App.tsx 与 packages/renderer/src/index.ts | 四个柔和椭圆区域与局部参数已完成 |
 | FR-09 至 FR-10 | apps/web/src/app/App.tsx | 撤销、重做、重置状态逻辑和浏览器 JPEG 导出已完成 |
 | FR-11 至 FR-12 | apps/web/src/app/App.tsx 与 apps/gateway/src/index.ts | AbortController、过期关联检查、配额端点、发送说明和键盘撤销已完成 |
