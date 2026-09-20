@@ -2,7 +2,10 @@ import type { EditState } from '@photo-copilot/domain';
 
 const vertex = `#version 300 es
 in vec2 a_position; out vec2 v_uv;
-void main(){ v_uv=(a_position+1.0)*.5; gl_Position=vec4(a_position,0.,1.); }`;
+// uv.y 翻转:浏览器 WebGL2 上传 ImageBitmap 时,UNPACK_FLIP_Y_WEBGL 在实测中
+// 没有任何效果(四种 flipY 取值结果相同),所以方向纠正放在这里——把 GL
+// 的 [0,1] (底→顶) UV 重映射为 [1,0] (顶→底),使画布顶部 = 图像顶部。
+void main(){ v_uv=vec2((a_position.x+1.0)*.5, 1.0-(a_position.y+1.0)*.5); gl_Position=vec4(a_position,0.,1.); }`;
 // 渲染管线按 docs/COLOR-GRADING.md §5.3 设计:
 //   1. 白平衡(warmth/tint) 2. 曝光 3. 区域(高光/阴影)
 //   4. 端点(白色色阶/黑色色阶) 5. 清晰度 6. 自然饱和度/饱和度 7. 对比度
@@ -73,7 +76,7 @@ export class PhotoRenderer {
     const pos = gl.getAttribLocation(program, 'a_position'); gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
-  async load(blob: Blob) { this.bitmap?.close(); this.bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' }); const gl=this.gl; gl.bindTexture(gl.TEXTURE_2D,this.texture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,this.bitmap); }
+  async load(blob: Blob) { this.bitmap?.close(); this.bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' }); const gl=this.gl; gl.bindTexture(gl.TEXTURE_2D,this.texture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,this.bitmap); /* FLIP_Y 在本路径无效,方向纠正由 vertex 内的 uv.y 翻转承担 */ }
   render(state: EditState, width = this.canvas.clientWidth, height = this.canvas.clientHeight) {
     if (!this.bitmap) return; const gl=this.gl; const ratio = devicePixelRatio || 1; this.canvas.width=Math.max(1,Math.round(width*ratio)); this.canvas.height=Math.max(1,Math.round(height*ratio)); gl.viewport(0,0,this.canvas.width,this.canvas.height); gl.useProgram(this.program);
     const uniform=(name:string)=>gl.getUniformLocation(this.program,name); const g=state.global;
