@@ -2,13 +2,31 @@ import { z } from 'zod';
 
 export const SCHEMA_VERSION = 1 as const;
 export const RENDERER_VERSION = 'pc-render-1' as const;
-export const globalKeys = ['exposureEV', 'contrast', 'highlights', 'shadows', 'warmth', 'tint', 'saturation'] as const;
+// 全局可调参数顺序与区间见 docs/COLOR-GRADING.md §4.1。
+// 新增顺序遵循"光-色分区命名",与 Lightroom / Capture One / DaVinci 三方共识对齐。
+export const globalKeys = [
+  'exposureEV', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'clarity',
+  'warmth', 'tint', 'vibrance', 'saturation',
+] as const;
 export type GlobalKey = (typeof globalKeys)[number];
 
 const finite = (min: number, max: number) => z.number().finite().min(min).max(max);
 export const GlobalSchema = z.object({
-  exposureEV: finite(-2, 2), contrast: finite(-100, 100), highlights: finite(-100, 100), shadows: finite(-100, 100),
-  warmth: finite(-100, 100), tint: finite(-100, 100), saturation: finite(-100, 100),
+  exposureEV: finite(-2, 2),
+  contrast: finite(-100, 100),
+  highlights: finite(-100, 100),
+  shadows: finite(-100, 100),
+  // 端点映射锚点(Lightroom Whites/Blacks / Capture One HDR White/Black)。
+  whites: finite(-100, 100),
+  blacks: finite(-100, 100),
+  // 中间调边缘对比度(Lightroom Clarity / C1 Clarity / DV Midtone Detail)。
+  // 渲染端采用无邻域采样的中间调对比近似,见 renderer shader 注释。
+  clarity: finite(-100, 100),
+  warmth: finite(-100, 100),
+  tint: finite(-100, 100),
+  // 非线性饱和度(Lightroom Vibrance / DV Color Boost)。低饱和色优先提升。
+  vibrance: finite(-100, 100),
+  saturation: finite(-100, 100),
 }).strict();
 export const LocalAdjustmentsSchema = z.object({ exposureEV: finite(-2, 2), highlights: finite(-100, 100), saturation: finite(-100, 100) }).strict();
 export const CropSchema = z.object({ x: finite(0, 1), y: finite(0, 1), width: finite(0.000001, 1), height: finite(0.000001, 1) }).strict()
@@ -29,7 +47,10 @@ export type EditState = z.infer<typeof EditStateSchema>;
 export type Region = z.infer<typeof RegionSchema>;
 export type Transform = z.infer<typeof TransformSchema>;
 
-export const defaultGlobal = (): z.infer<typeof GlobalSchema> => ({ exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, warmth: 0, tint: 0, saturation: 0 });
+export const defaultGlobal = (): z.infer<typeof GlobalSchema> => ({
+  exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, clarity: 0,
+  warmth: 0, tint: 0, vibrance: 0, saturation: 0,
+});
 export const createInitialState = (imageId: string, width: number, height: number): EditState => EditStateSchema.parse({
   schemaVersion: SCHEMA_VERSION, rendererVersion: RENDERER_VERSION, imageId, revision: 0, sourceWidth: width, sourceHeight: height,
   global: defaultGlobal(), transform: { angleDeg: 0, crop: { x: 0, y: 0, width: 1, height: 1 }, aspectLock: 'original' }, regions: [],
