@@ -1,53 +1,391 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { create } from 'zustand';
-import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { applyChanges, changedSummary, createInitialState, type EditState, type GlobalKey, type PlanPayload } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
+import { activeSlot, useEditor } from '../state/editor';
+import { TopBar } from './TopBar';
+import { ThumbnailSidebar } from './ThumbnailSidebar';
+import { ControlsPanel } from './ControlsPanel';
+import { CopilotPanel } from './CopilotPanel';
 
-type Candidate={payload:PlanPayload; planId:string; requestId:string; baseRevision:number};
-type EditorStore={state?:EditState; history:EditState[]; future:EditState[]; candidate?:Candidate; commit:(next:EditState)=>void; undo:()=>void; redo:()=>void; setCandidate:(candidate?:Candidate)=>void; reset:()=>void};
-const useEditor=create<EditorStore>((set,get)=>({
-  history:[],future:[],commit:(next)=>{const current=get().state;if(!current)return;set({state:{...next,revision:current.revision+1},history:[...get().history,current].slice(-100),future:[],candidate:undefined});},
-  undo:()=>{const {state,history,future}=get();const prior=history.at(-1);if(!state||!prior)return;set({state:{...prior,revision:state.revision+1},history:history.slice(0,-1),future:[state,...future],candidate:undefined});},
-  redo:()=>{const {state,history,future}=get();const next=future[0];if(!state||!next)return;set({state:{...next,revision:state.revision+1},history:[...history,state],future:future.slice(1),candidate:undefined});},
-  setCandidate:(candidate)=>set({candidate}),reset:()=>{const state=get().state;if(!state)return;get().commit({...state,global:defaultGlobal(),transform:{angleDeg:0,crop:{x:0,y:0,width:1,height:1},aspectLock:'original'},regions:[]});},
-}));
-const labels:Record<GlobalKey,string>={exposureEV:'曝光',contrast:'对比度',highlights:'高光',shadows:'阴影',warmth:'暖冷',tint:'色偏',saturation:'饱和度'};
-const limits:Record<GlobalKey,[number,number,number]>={exposureEV:[-2,2,.01],contrast:[-100,100,1],highlights:[-100,100,1],shadows:[-100,100,1],warmth:[-100,100,1],tint:[-100,100,1],saturation:[-100,100,1]};
-function uid(){return crypto.randomUUID();}
-async function normalizedBlob(file:File){ const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'}); const canvas=document.createElement('canvas');canvas.width=bitmap.width;canvas.height=bitmap.height;const ctx=canvas.getContext('2d',{colorSpace:'srgb'})!;ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(bitmap,0,0);bitmap.close();return new Promise<Blob>((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('图片规范化失败')),'image/png')); }
-async function previewFromBlob(blob:Blob,maxEdge:number){const bitmap=await createImageBitmap(blob);const scale=Math.min(1,maxEdge/Math.max(bitmap.width,bitmap.height));const canvas=document.createElement('canvas');canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);canvas.getContext('2d')!.drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const jpeg=await new Promise<Blob>((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('JPEG 编码失败')),'image/jpeg',.85));return {blob:jpeg,width:canvas.width,height:canvas.height};}
-async function toBase64(blob:Blob){return new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]!);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
+function uid() { return crypto.randomUUID(); }
 
-export function App(){
- const canvas=useRef<HTMLCanvasElement>(null); const renderer=useRef<PhotoRenderer | undefined>(undefined); const resource=useRef<{blob:Blob;name:string} | undefined>(undefined); const controller=useRef<AbortController | undefined>(undefined);
- const {state,history,future,candidate,commit,undo,redo,setCandidate,reset}=useEditor(); const [status,setStatus]=useState('导入一张 JPEG 或 PNG 开始编辑'); const [instruction,setInstruction]=useState(''); const [allowComposition,setAllowComposition]=useState(false); const [zoom,setZoom]=useState(100); const [session,setSession]=useState<boolean>(); const [invite,setInvite]=useState(''); const [showInvite,setShowInvite]=useState(false); const [exporting,setExporting]=useState(false);
- const displayState=candidate&&state ? applyChanges(state,candidate.payload.changes!,allowComposition) : state;
- const draw=useCallback(()=>{if(displayState&&renderer.current&&canvas.current){const parent=canvas.current.parentElement;const availableWidth=(parent?.clientWidth??900)*.92;const availableHeight=(parent?.clientHeight??600)*.87;const aspect=(displayState.sourceWidth*displayState.transform.crop.width)/(displayState.sourceHeight*displayState.transform.crop.height);const width=Math.min(availableWidth,availableHeight*aspect);renderer.current.render(displayState,width,width/aspect);}},[displayState]);
- useEffect(()=>{draw();},[draw]); useEffect(()=>{const handler=()=>draw();window.addEventListener('resize',handler);return()=>window.removeEventListener('resize',handler)},[draw]);
- useEffect(()=>{fetch('/api/session').then(r=>r.json()).then(value=>setSession(value.authenticated)).catch(()=>setSession(false));},[]);
- useEffect(()=>{const keyboard=(event:KeyboardEvent)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'&&!(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement)){event.preventDefault();event.shiftKey?redo():undo();}};window.addEventListener('keydown',keyboard);return()=>window.removeEventListener('keydown',keyboard)},[redo,undo]);
- const load=async(file?:File)=>{if(!file)return; if(!['image/jpeg','image/png'].includes(file.type)){setStatus('仅支持 JPEG 或 PNG 图片');return;}if(file.size>25*1024*1024){setStatus('图片超过 25 MiB 限制');return;}try{setStatus('正在解码和规范化图片');const blob=await normalizedBlob(file);const bitmap=await createImageBitmap(blob);if(bitmap.width*bitmap.height>24_000_000||bitmap.width>8192||bitmap.height>8192||bitmap.width<64||bitmap.height<64){bitmap.close();throw new Error('图片尺寸不在 64 像素至 2400 万像素范围内');}const next=createInitialState(uid(),bitmap.width,bitmap.height);bitmap.close();renderer.current?.dispose();renderer.current=new PhotoRenderer(canvas.current!);await renderer.current.load(blob);resource.current={blob,name:file.name.replace(/\.[^.]+$/,'')};useEditor.setState({state:next,history:[],future:[],candidate:undefined});setStatus('本地编辑已就绪。关闭或刷新页面会结束当前会话');}catch(error){setStatus(error instanceof Error?error.message:'图片无法解码');}};
- const change=(key:GlobalKey,value:number)=>{if(!state||candidate)return;controller.current?.abort();const next={...state,global:{...state.global,[key]:value}};commit(next)};
- const changeCrop=(key:'x'|'y'|'width'|'height',value:number)=>{if(!state||candidate)return;const crop={...state.transform.crop,[key]:value};crop.width=Math.min(crop.width,1-crop.x);crop.height=Math.min(crop.height,1-crop.y);commit({...state,transform:{...state.transform,crop}})};
- const addRegion=()=>{if(!state||candidate)return;if(state.regions.length===4){setStatus('局部区域最多四个');return;}const region:Region={id:uid(),label:`局部区域 ${state.regions.length+1}`,enabled:true,centerX:.5,centerY:.5,radiusX:.2,radiusY:.2,feather:.35,adjustments:{exposureEV:0,highlights:0,saturation:0}};commit({...state,regions:[...state.regions,region]});};
- const requestPlan=async(mode:'auto'|'followup')=>{if(!state||!resource.current||candidate)return;if(!session){setShowInvite(true);setStatus('输入邀请代码后可以使用 AI');return;}if(mode==='followup'&&!instruction.trim()){setStatus('请输入希望修改的内容');return;}try{controller.current?.abort();const signal=new AbortController();controller.current=signal;setStatus('正在生成建议，可继续手动编辑或取消');const original=await previewFromBlob(resource.current.blob,1024);const offscreen=document.createElement('canvas');const currentRenderer=new PhotoRenderer(offscreen);await currentRenderer.load(resource.current.blob);const current=await previewFromBlob(await (async()=>{currentRenderer.render(state,original.width,original.height);return currentRenderer.toBlob(.85)})(),1024);currentRenderer.dispose();const payload:PlanRequest={schemaVersion:1,requestId:uid(),imageId:state.imageId,baseRevision:state.revision,mode,instruction:mode==='auto'?'自然改善照片，保持现场氛围':instruction.trim(),state,allowComposition,originalPreview:{mime:'image/jpeg',width:original.width,height:original.height,base64:await toBase64(original.blob)},currentPreview:{mime:'image/jpeg',width:current.width,height:current.height,base64:await toBase64(current.blob)},context:[]};const response=await fetch('/api/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:signal.signal});const body=await response.json();if(!response.ok)throw new Error(body.message??'建议请求失败');if(state.imageId!==body.imageId||state.revision!==body.baseRevision)throw new Error('建议已过期');if(body.payload.status!=='plan'){setStatus(body.payload.message||'本次没有可应用的建议');return;}setCandidate({payload:body.payload,planId:body.planId,requestId:body.requestId,baseRevision:body.baseRevision});setStatus('正在预览建议。可应用或放弃');}catch(error){if((error as DOMException).name==='AbortError')setStatus('已取消建议');else setStatus(error instanceof Error?error.message:'建议请求失败');}};
- const applyCandidate=()=>{if(!state||!candidate||candidate.baseRevision!==state.revision)return;try{const next=applyChanges(state,candidate.payload.changes!,allowComposition);commit(next);setInstruction('');setStatus(`已应用建议。${changedSummary(state,next)}`);}catch(error){setStatus(error instanceof Error?error.message:'建议无法应用');}};
- const exportImage=async()=>{if(!state||!resource.current||candidate)return;try{setExporting(true);controller.current?.abort();const crop=state.transform.crop;const outW=Math.round(state.sourceWidth*crop.width),outH=Math.round(state.sourceHeight*crop.height);const offscreen=document.createElement('canvas');const output=new PhotoRenderer(offscreen);await output.load(resource.current.blob);output.render(state,outW,outH);const blob=await output.toBlob(.92);output.dispose();const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${resource.current.name}-edited.jpg`;link.click();URL.revokeObjectURL(link.href);setStatus(`已导出 ${outW} × ${outH} JPEG`);}catch(error){setStatus(error instanceof Error?error.message:'导出资源不足。请缩小裁切范围后重新尝试。');}finally{setExporting(false);}};
- const login=async()=>{const response=await fetch('/api/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:invite})});if(response.ok){setSession(true);setShowInvite(false);setStatus('邀请会话已建立');}else setStatus('邀请代码无效或当前服务未配置');};
- return <main onDragOver={event=>event.preventDefault()} onDrop={event=>{event.preventDefault();void load(event.dataTransfer.files[0]);}}>
-  <header className="toolbar"><label className="import"><input type="file" accept="image/jpeg,image/png" onChange={event=>void load(event.target.files?.[0])}/>导入</label><button disabled={!state||!history.length} onClick={undo}>↶ 撤销</button><button disabled={!state||!future.length} onClick={redo}>↷ 重做</button><button disabled={!state} onMouseDown={()=>state&&renderer.current?.render({...state,global:defaultGlobal(),regions:[]})} onMouseUp={draw}>对比</button><span className="spacer"/><button onClick={()=>setZoom(Math.max(25,zoom-25))}>−</button><output>{zoom}%</output><button onClick={()=>setZoom(Math.min(200,zoom+25))}>＋</button><button className="export" disabled={!state||Boolean(candidate)||exporting} onClick={()=>void exportImage()}>{exporting?'导出中':'导出'}</button></header>
-  <section className="workspace"><div className="canvasWrap"><canvas ref={canvas} style={{transform:`scale(${zoom/100})`}} aria-label="照片编辑画布"/><p className="status">{status}</p></div><aside className="controls">
-   <details open><summary>构图</summary><label className="check"><input type="checkbox" checked={allowComposition} onChange={event=>setAllowComposition(event.target.checked)}/>允许 AI 建议构图</label><label>比例<select value={state?.transform.aspectLock??'original'} disabled={!state||!!candidate} onChange={event=>state&&commit({...state,transform:{...state.transform,aspectLock:event.target.value as EditState['transform']['aspectLock']}})}><option value="free">自由</option><option value="original">原图</option><option value="square">正方形</option><option value="portrait4x5">4 比 5</option><option value="landscape3x2">3 比 2</option><option value="wide16x9">16 比 9</option></select></label><Slider label="调平" value={state?.transform.angleDeg??0} min={-10} max={10} step={.1} disabled={!state||!!candidate} onChange={value=>state&&commit({...state,transform:{...state.transform,angleDeg:value}})}/><Slider label="裁切左侧" value={state?.transform.crop.x??0} min={0} max={1-(state?.transform.crop.width??1)} step={.0001} disabled={!state||!!candidate} onChange={value=>changeCrop('x',value)}/><Slider label="裁切顶部" value={state?.transform.crop.y??0} min={0} max={1-(state?.transform.crop.height??1)} step={.0001} disabled={!state||!!candidate} onChange={value=>changeCrop('y',value)}/><Slider label="裁切宽度" value={state?.transform.crop.width??1} min={.01} max={1-(state?.transform.crop.x??0)} step={.0001} disabled={!state||!!candidate} onChange={value=>changeCrop('width',value)}/><Slider label="裁切高度" value={state?.transform.crop.height??1} min={.01} max={1-(state?.transform.crop.y??0)} step={.0001} disabled={!state||!!candidate} onChange={value=>changeCrop('height',value)}/></details>
-   <details open><summary>光线</summary>{(['exposureEV','contrast','highlights','shadows'] as GlobalKey[]).map(key=><Slider key={key} label={labels[key]} value={state?.global[key]??0} {...range(key)} disabled={!state||!!candidate} onChange={value=>change(key,value)}/>)}</details>
-   <details open><summary>色彩</summary>{(['warmth','tint','saturation'] as GlobalKey[]).map(key=><Slider key={key} label={labels[key]} value={state?.global[key]??0} {...range(key)} disabled={!state||!!candidate} onChange={value=>change(key,value)}/>)}</details>
-   <details open><summary>局部区域 <button className="tiny" disabled={!state||!!candidate} onClick={addRegion}>添加</button></summary>{state?.regions.map(region=><RegionRow key={region.id} region={region} disabled={!!candidate} onChange={next=>commit({...state,regions:state.regions.map(item=>item.id===next.id?next:item)})} onDelete={()=>commit({...state,regions:state.regions.filter(item=>item.id!==region.id)})}/>)}</details>
-  </aside></section>
-  <section className="copilot"><div className="copilotHeader"><strong>✦ AI 副驾</strong><span>原始文件留在浏览器。仅将缩略图、文字和编辑参数发送至模型服务。</span></div>{candidate?<Suggestion payload={candidate.payload} onApply={applyCandidate} onDiscard={()=>{setCandidate();setStatus('已放弃建议');}}/>:<><div className="suggestion muted">{state?'点击分析并建议，或用一句话说明希望保留和改变的内容。':'导入照片后可获得可解释的参数建议。'}</div><div className="ask"><textarea value={instruction} maxLength={1000} onChange={event=>setInstruction(event.target.value)} placeholder="例如，让太阳附近暗一点，保留现在的暖色氛围" disabled={!state}/><div><button disabled={!state} onClick={()=>void requestPlan('auto')}>分析并建议</button><button className="primary" disabled={!state} onClick={()=>void requestPlan('followup')}>发送指令</button><button onClick={()=>controller.current?.abort()} disabled={!state}>取消</button></div></div></>}</section>
-  {showInvite&&<div className="modal"><div><h2>输入邀请代码</h2><p>AI 建议需要邀请会话。本地编辑与导出无需联网。</p><input value={invite} onChange={event=>setInvite(event.target.value)} autoFocus/><button className="primary" onClick={()=>void login()}>继续</button><button onClick={()=>setShowInvite(false)}>关闭</button></div></div>}
- </main>;
+async function normalizedBlob(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' })!;
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('图片规范化失败')), 'image/png');
+  });
 }
-function range(key:GlobalKey){const [min,max,step]=limits[key];return {min,max,step};}
-function Slider({label,value,min,max,step,onChange,disabled}:{label:string;value:number;min:number;max:number;step:number;onChange:(value:number)=>void;disabled:boolean}){return <label className="slider"><span>{label}</span><input type="range" value={value} min={min} max={max} step={step} disabled={disabled} onChange={event=>onChange(Number(event.target.value))}/><input aria-label={`${label}数值`} type="number" value={value} min={min} max={max} step={step} disabled={disabled} onChange={event=>onChange(Number(event.target.value))}/></label>}
-function RegionRow({region,disabled,onChange,onDelete}:{region:Region;disabled:boolean;onChange:(region:Region)=>void;onDelete:()=>void}){return <div className="region"><div><input value={region.label} disabled={disabled} onChange={event=>onChange({...region,label:event.target.value})}/><button className="tiny" disabled={disabled} onClick={onDelete}>删除</button></div><label className="check"><input type="checkbox" checked={region.enabled} disabled={disabled} onChange={event=>onChange({...region,enabled:event.target.checked})}/>显示区域</label><Slider label="中心 X" value={region.centerX} min={0} max={1} step={.0001} disabled={disabled} onChange={value=>onChange({...region,centerX:value})}/><Slider label="中心 Y" value={region.centerY} min={0} max={1} step={.0001} disabled={disabled} onChange={value=>onChange({...region,centerY:value})}/><Slider label="横向范围" value={region.radiusX} min={.01} max={1} step={.0001} disabled={disabled} onChange={value=>onChange({...region,radiusX:value})}/><Slider label="纵向范围" value={region.radiusY} min={.01} max={1} step={.0001} disabled={disabled} onChange={value=>onChange({...region,radiusY:value})}/><Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={.01} disabled={disabled} onChange={value=>onChange({...region,adjustments:{...region.adjustments,exposureEV:value}})}/><Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={1} disabled={disabled} onChange={value=>onChange({...region,adjustments:{...region.adjustments,highlights:value}})}/><Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={1} disabled={disabled} onChange={value=>onChange({...region,adjustments:{...region.adjustments,saturation:value}})}/><Slider label="羽化" value={region.feather} min={.05} max={1} step={.01} disabled={disabled} onChange={value=>onChange({...region,feather:value})}/></div>}
-function Suggestion({payload,onApply,onDiscard}:{payload:PlanPayload;onApply:()=>void;onDiscard:()=>void}){return <div className="suggestion"><div><strong>{payload.message}</strong>{payload.observations.map(item=><p key={item}>{item}</p>)}{payload.reasons.map(reason=><small key={reason.target}>{reason.intent}</small>)}</div><div><button onClick={onDiscard}>放弃建议</button><button className="primary" onClick={onApply}>应用建议</button></div></div>}
+
+async function thumbnailFromBlob(blob: Blob, maxEdge = 240): Promise<string> {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return canvas.toDataURL('image/jpeg', 0.8);
+}
+
+async function previewFromBlob(blob: Blob, maxEdge: number) {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => value ? resolve(value) : reject(new Error('JPEG 编码失败')), 'image/jpeg', 0.85);
+  }).then((jpeg) => ({ blob: jpeg, width: canvas.width, height: canvas.height }));
+}
+
+async function toBase64(blob: Blob): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]!);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+export function App() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rendererRef = useRef<PhotoRenderer | undefined>(undefined);
+  const currentSlot = useEditor((state) => activeSlot(state));
+  const images = useEditor((state) => state.images);
+  const activeIndex = useEditor((state) => state.activeIndex);
+  const candidate = useEditor((state) => state.candidate);
+  const commit = useEditor((state) => state.commit);
+  const undo = useEditor((state) => state.undo);
+  const redo = useEditor((state) => state.redo);
+  const setCandidate = useEditor((state) => state.setCandidate);
+  const reset = useEditor((state) => state.reset);
+  const addImage = useEditor((state) => state.addImage);
+  const setActiveIndex = useEditor((state) => state.setActiveIndex);
+  const removeImage = useEditor((state) => state.removeImage);
+
+  const state = currentSlot?.state;
+
+  const [status, setStatus] = useState('导入一张 JPEG 或 PNG 开始编辑');
+  const [instruction, setInstruction] = useState('');
+  const [allowComposition, setAllowComposition] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [session, setSession] = useState<boolean>();
+  const [invite, setInvite] = useState('');
+  const [showInvite, setShowInvite] = useState(false);
+  const [compare, setCompare] = useState(false);
+
+  const controllerRef = useRef<AbortController | undefined>(undefined);
+
+  const displayState = useMemo<EditState | undefined>(() => {
+    if (!state) return undefined;
+    if (candidate && candidate.baseRevision === state.revision) {
+      try {
+        return applyChanges(state, candidate.payload.changes!, allowComposition);
+      } catch {
+        return state;
+      }
+    }
+    return state;
+  }, [state, candidate, allowComposition]);
+
+  const draw = useCallback(() => {
+    if (!displayState || !rendererRef.current || !canvasRef.current) return;
+    const parent = canvasRef.current.parentElement;
+    const availableWidth = (parent?.clientWidth ?? 900) * 0.92;
+    const availableHeight = (parent?.clientHeight ?? 600) * 0.87;
+    const aspect = (displayState.sourceWidth * displayState.transform.crop.width) / (displayState.sourceHeight * displayState.transform.crop.height);
+    const width = Math.min(availableWidth, availableHeight * aspect);
+    rendererRef.current.render(displayState, width, width / aspect);
+  }, [displayState]);
+
+  useEffect(() => { draw(); }, [draw]);
+  useEffect(() => {
+    const handler = () => draw();
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, [draw]);
+
+  useEffect(() => {
+    fetch('/api/session').then((r) => r.json()).then((value) => setSession(value.authenticated)).catch(() => setSession(false));
+  }, []);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.key.toLowerCase() !== 'z') return;
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      event.preventDefault();
+      event.shiftKey ? redo() : undo();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [redo, undo]);
+
+  // Switch renderer to the active image's blob whenever activeIndex changes.
+  useEffect(() => {
+    if (!currentSlot || !canvasRef.current) return;
+    rendererRef.current?.dispose();
+    const r = new PhotoRenderer(canvasRef.current);
+    rendererRef.current = r;
+    void r.load(currentSlot.blob).then(() => draw());
+  }, [currentSlot?.blob]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFit = useCallback(() => { draw(); }, [draw]);
+
+  const handleCompareStart = useCallback(() => {
+    if (!state) return;
+    setCompare(true);
+    rendererRef.current?.render({ ...state, global: { exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, warmth: 0, tint: 0, saturation: 0 }, regions: [] });
+  }, [state]);
+
+  const handleCompareEnd = useCallback(() => {
+    setCompare(false);
+    draw();
+  }, [draw]);
+
+  const handleImport = async (file: File) => {
+    if (!['image/jpeg', 'image/png'].includes(file.type)) { setStatus('仅支持 JPEG 或 PNG 图片'); return; }
+    if (file.size > 25 * 1024 * 1024) { setStatus('图片超过 25 MiB 限制'); return; }
+    try {
+      setStatus('正在解码和规范化图片');
+      const blob = await normalizedBlob(file);
+      const bitmap = await createImageBitmap(blob);
+      if (bitmap.width * bitmap.height > 24_000_000 || bitmap.width > 8192 || bitmap.height > 8192 || bitmap.width < 64 || bitmap.height < 64) {
+        bitmap.close();
+        throw new Error('图片尺寸不在 64 像素至 2400 万像素范围内');
+      }
+      const next = createInitialState(uid(), bitmap.width, bitmap.height);
+      bitmap.close();
+      const thumbnail = await thumbnailFromBlob(blob);
+      addImage({
+        blob,
+        name: file.name.replace(/\.[^.]+$/, ''),
+        thumbnail,
+        state: next,
+      });
+      setInstruction('');
+      setStatus('本地编辑已就绪。关闭或刷新页面会结束当前会话');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '图片无法解码');
+    }
+  };
+
+  const handleGlobalChange = (key: GlobalKey, value: number) => {
+    if (!state || candidate) return;
+    controllerRef.current?.abort();
+    commit({ ...state, global: { ...state.global, [key]: value } });
+  };
+
+  const handleTransformChange = (patch: Partial<EditState['transform']>) => {
+    if (!state || candidate) return;
+    commit({ ...state, transform: { ...state.transform, ...patch } });
+  };
+
+  const handleAspectLockChange = (value: EditState['transform']['aspectLock']) => {
+    if (!state || candidate) return;
+    commit({ ...state, transform: { ...state.transform, aspectLock: value } });
+  };
+
+  const handleCropChange = (key: 'x' | 'y' | 'width' | 'height', value: number) => {
+    if (!state || candidate) return;
+    const crop = { ...state.transform.crop, [key]: value };
+    crop.width = Math.min(crop.width, 1 - crop.x);
+    crop.height = Math.min(crop.height, 1 - crop.y);
+    commit({ ...state, transform: { ...state.transform, crop } });
+  };
+
+  const handleAddRegion = () => {
+    if (!state || candidate) return;
+    if (state.regions.length === 4) { setStatus('局部区域最多四个'); return; }
+    const region = {
+      id: uid(),
+      label: `局部区域 ${state.regions.length + 1}`,
+      enabled: true,
+      centerX: 0.5,
+      centerY: 0.5,
+      radiusX: 0.2,
+      radiusY: 0.2,
+      feather: 0.35,
+      adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
+    };
+    commit({ ...state, regions: [...state.regions, region] });
+  };
+
+  const requestPlan = async (mode: 'auto' | 'followup') => {
+    if (!state || !currentSlot || candidate) return;
+    if (!session) { setShowInvite(true); setStatus('输入邀请代码后可以使用 AI'); return; }
+    if (mode === 'followup' && !instruction.trim()) { setStatus('请输入希望修改的内容'); return; }
+    try {
+      controllerRef.current?.abort();
+      const signal = new AbortController();
+      controllerRef.current = signal;
+      setBusy(true);
+      setStatus('正在生成建议，可继续手动编辑或取消');
+      const original = await previewFromBlob(currentSlot.blob, 1024);
+      const offscreen = document.createElement('canvas');
+      const currentRenderer = new PhotoRenderer(offscreen);
+      await currentRenderer.load(currentSlot.blob);
+      currentRenderer.render(state, original.width, original.height);
+      const current = await previewFromBlob(await currentRenderer.toBlob(0.85), 1024);
+      currentRenderer.dispose();
+      const payload: PlanRequest = {
+        schemaVersion: 1,
+        requestId: uid(),
+        imageId: state.imageId,
+        baseRevision: state.revision,
+        mode,
+        instruction: mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim(),
+        state,
+        allowComposition,
+        originalPreview: { mime: 'image/jpeg', width: original.width, height: original.height, base64: await toBase64(original.blob) },
+        currentPreview: { mime: 'image/jpeg', width: current.width, height: current.height, base64: await toBase64(current.blob) },
+        context: [],
+      };
+      const response = await fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: signal.signal });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message ?? '建议请求失败');
+      if (state.imageId !== body.imageId || state.revision !== body.baseRevision) throw new Error('建议已过期');
+      const planPayload = body.payload as PlanPayload;
+      if (planPayload.status !== 'plan') { setStatus(planPayload.message || '本次没有可应用的建议'); return; }
+      setCandidate({ payload: planPayload, planId: body.planId, requestId: body.requestId, baseRevision: body.baseRevision });
+      setStatus('正在预览建议。可应用或放弃');
+    } catch (error) {
+      if ((error as DOMException).name === 'AbortError') setStatus('已取消建议');
+      else setStatus(error instanceof Error ? error.message : '建议请求失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyCandidate = () => {
+    if (!state || !candidate || candidate.baseRevision !== state.revision) return;
+    try {
+      const next = applyChanges(state, candidate.payload.changes!, allowComposition);
+      commit(next);
+      setInstruction('');
+      setStatus(`已应用建议。${changedSummary(state, next)}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '建议无法应用');
+    }
+  };
+
+  const handleExport = async () => {
+    if (!state || !currentSlot || candidate) return;
+    try {
+      setExporting(true);
+      controllerRef.current?.abort();
+      const crop = state.transform.crop;
+      const outW = Math.round(state.sourceWidth * crop.width);
+      const outH = Math.round(state.sourceHeight * crop.height);
+      const offscreen = document.createElement('canvas');
+      const output = new PhotoRenderer(offscreen);
+      await output.load(currentSlot.blob);
+      output.render(state, outW, outH);
+      const blob = await output.toBlob(0.92);
+      output.dispose();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${currentSlot.name}-edited.jpg`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      setStatus(`已导出 ${outW} × ${outH} JPEG`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '导出资源不足。请缩小裁切范围后重新尝试。');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    const response = await fetch('/api/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: invite }) });
+    if (response.ok) { setSession(true); setShowInvite(false); setStatus('邀请会话已建立'); }
+    else setStatus('邀请代码无效或当前服务未配置');
+  };
+
+  return (
+    <main onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void handleImport(file); }}>
+      <TopBar
+        hasState={Boolean(state)}
+        canUndo={Boolean(currentSlot && currentSlot.history.length > 0)}
+        canRedo={Boolean(currentSlot && currentSlot.future.length > 0)}
+        exporting={exporting}
+        onImport={handleImport}
+        onUndo={undo}
+        onRedo={redo}
+        onCompareStart={handleCompareStart}
+        onCompareEnd={handleCompareEnd}
+        onZoomIn={() => { /* handled by canvas transform in styles */ }}
+        onZoomOut={() => { /* handled by canvas transform in styles */ }}
+        onFit={handleFit}
+        onExport={handleExport}
+      />
+      <section className="content">
+        <div className="leftStack">
+          <ThumbnailSidebar
+            images={images}
+            activeIndex={activeIndex}
+            onSelect={setActiveIndex}
+            onRemove={(index) => {
+              removeImage(index);
+              setStatus('已从当前会话移除图片');
+            }}
+          />
+          <div className="canvasWrap">
+            <canvas ref={canvasRef} aria-label="照片编辑画布" />
+            <p className="status">{compare ? '按住对比中' : status}</p>
+          </div>
+          <CopilotPanel
+            status={status}
+            instruction={instruction}
+            setInstruction={setInstruction}
+            hasState={Boolean(state)}
+            busy={busy}
+            onAuto={() => void requestPlan('auto')}
+            onFollowup={() => void requestPlan('followup')}
+            onCancel={() => controllerRef.current?.abort()}
+            onClose={() => setStatus('AI 面板已收起。可随时从工具栏再次触发。')}
+            thumbnail={currentSlot?.thumbnail}
+            candidate={candidate?.payload}
+            onApply={applyCandidate}
+            onDiscard={() => { setCandidate(); setStatus('已放弃建议'); }}
+          />
+        </div>
+        <ControlsPanel
+          state={state}
+          disabled={Boolean(candidate)}
+          allowComposition={allowComposition}
+          onAllowCompositionChange={setAllowComposition}
+          onGlobalChange={handleGlobalChange}
+          onTransformChange={handleTransformChange}
+          onCropChange={handleCropChange}
+          onAspectLockChange={handleAspectLockChange}
+          onAddRegion={handleAddRegion}
+          regionCount={state?.regions.length ?? 0}
+        />
+      </section>
+      {showInvite && (
+        <div className="modal">
+          <div>
+            <h2>输入邀请代码</h2>
+            <p>AI 建议需要邀请会话。本地编辑与导出无需联网。</p>
+            <input value={invite} onChange={(event) => setInvite(event.target.value)} autoFocus />
+            <button className="primary" onClick={() => void handleLogin()}>继续</button>
+            <button onClick={() => setShowInvite(false)}>关闭</button>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
