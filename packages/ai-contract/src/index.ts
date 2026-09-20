@@ -13,12 +13,5 @@ export const PlanRequestSchema = z.object({
 });
 export type PlanRequest = z.infer<typeof PlanRequestSchema>;
 export const PlanResponseSchema = z.object({ requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), planId: z.uuid(), model: z.string(), promptVersion: z.literal('pc-planner-1'), rendererVersion: z.literal(RENDERER_VERSION), payload: PlanPayloadSchema, usage: z.object({ inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), cachedInputTokens: z.number().int().nullable(), attempts: z.number().int().positive(), durationMs: z.number().int().nonnegative() }).strict() }).strict();
-export const planJsonSchema = {
-  type: 'object', additionalProperties: false, required: ['status','observations','message','changes','reasons','limitations'],
-  properties: {
-    status: { type: 'string', enum: ['plan','clarify','unsupported'] }, observations: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 160 } }, message: { type: 'string', maxLength: 300 },
-    changes: { type: ['object','null'] }, reasons: { type: 'array', maxItems: 16, items: { type: 'object' } }, limitations: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 160 } },
-  },
-} as const;
 
 export const planPayloadJsonSchema = z.toJSONSchema(PlanPayloadSchema, { target: 'draft-2020-12' }) as Record<string, unknown>;
