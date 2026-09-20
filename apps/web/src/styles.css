@@ -152,6 +152,7 @@ main {
 .content {
   display: grid;
   grid-template-columns: 1fr 320px;
+  grid-template-rows: minmax(0, 1fr);
   background: var(--bg);
   min-height: 0;
 }
@@ -161,6 +162,7 @@ main {
   grid-template-columns: 110px 1fr;
   grid-template-rows: minmax(0, 1fr) 240px;
   min-height: 0;
+  height: 100%;
 }
 
 /* Thumbnail sidebar */
