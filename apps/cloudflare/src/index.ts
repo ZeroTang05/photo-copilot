@@ -1,0 +1,104 @@
+import { DurableObject } from 'cloudflare:workers';
+import { z } from '../node_modules/zod/index.js';
+import { EditStateSchema, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION, validatePlan } from '../../../packages/domain/src/index';
+
+interface Env {
+  OPENAI_API_KEY?: string;
+  OPENAI_BASE_URL?: string;
+  AI_MODEL?: string;
+  SESSION_SECRET: string;
+  ALLOWED_ORIGIN?: string;
+  DAILY_AI_ATTEMPT_LIMIT?: string;
+  DAILY_AI_ATTEMPT_LIMIT_PER_SESSION?: string;
+  AI_QUOTA: DurableObjectNamespace;
+  ASSETS: Fetcher;
+}
+
+type Session = { attempts: number; day: string; requestIds: Record<string, number> };
+const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
+const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict();
+const today = () => new Date().toISOString().slice(0, 10);
+const error = (code: string, message: string, retryAfterSeconds: number | null = null) => ({ code, message, retryAfterSeconds });
+const response = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
+
+async function signature(value: string, secret: string) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const bytes = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value)));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sessionFor(request: Request, env: Env) {
+  const raw = request.headers.get('cookie')?.match(/(?:^|;\s*)pc_session=([^;]+)/)?.[1];
+  if (raw) {
+    const dot = raw.lastIndexOf('.');
+    if (dot > 0 && raw.slice(dot + 1) === await signature(raw.slice(0, dot), env.SESSION_SECRET)) return { id: raw.slice(0, dot), cookie: undefined };
+  }
+  const id = crypto.randomUUID();
+  const cookie = `pc_session=${id}.${await signature(id, env.SESSION_SECRET)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`;
+  return { id, cookie };
+}
+
+function allowed(request: Request, env: Env) {
+  const origin = request.headers.get('origin');
+  const origins = env.ALLOWED_ORIGIN?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
+  return Boolean(origin && (origins.length ? origins.includes(origin) : origin === new URL(request.url).origin));
+}
+
+export class AiQuota extends DurableObject {
+  async fetch(request: Request) {
+    const input = await request.json() as { action: 'read' | 'reserve' | 'delete'; sessionId: string; requestId?: string; limit: number; perSessionLimit: number };
+    const date = today();
+    const sessionKey = `session:${input.sessionId}`;
+    const session = (await this.ctx.storage.get<Session>(sessionKey)) ?? { attempts: 0, day: date, requestIds: {} };
+    const global = (await this.ctx.storage.get<{ attempts: number; day: string }>('global')) ?? { attempts: 0, day: date };
+    if (input.action === 'delete') { await this.ctx.storage.delete(sessionKey); return response({ deleted: true }); }
+    if (session.day !== date) Object.assign(session, { attempts: 0, day: date, requestIds: {} });
+    if (global.day !== date) Object.assign(global, { attempts: 0, day: date });
+    if (input.action === 'reserve') {
+      const previous = input.requestId ? session.requestIds[input.requestId] : undefined;
+      if (previous && Date.now() - previous < 600000) return response(error('REQUEST_DUPLICATE', '操作已提交'), 409);
+      if (session.attempts >= input.perSessionLimit || global.attempts >= input.limit) return response(error('QUOTA_EXHAUSTED', '今日 AI 额度已用完', 86400), 429);
+      session.attempts++; global.attempts++;
+      if (input.requestId) session.requestIds[input.requestId] = Date.now();
+      await this.ctx.storage.put(sessionKey, session); await this.ctx.storage.put('global', global);
+    }
+    return response({ remainingAttempts: Math.max(0, input.perSessionLimit - session.attempts), resetAt: `${date}T24:00:00.000Z` });
+  }
+}
+
+async function quota(env: Env, input: object) {
+  return env.AI_QUOTA.get(env.AI_QUOTA.idFromName('global')).fetch('https://quota.internal', { method: 'POST', body: JSON.stringify(input) });
+}
+
+async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse>) {
+  const base = (env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const compact = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' } });
+  const provider = await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions: '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。', input: [{ role: 'user', content: [{ type: 'input_text', text: compact }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }] }], text: { format: { type: 'json_object' } } }) });
+  const body = await provider.json() as Record<string, any>;
+  if (!provider.ok || body.status !== 'completed' || !body.output_text) throw new Error(`OpenAI 请求失败 ${provider.status}`);
+  const payload = PlanPayloadSchema.parse(JSON.parse(String(body.output_text).replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '')));
+  validatePlan(request.state, payload, request.allowComposition);
+  return { payload, model: String(body.model), usage: body.usage ?? {} };
+}
+
+export default { async fetch(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
+  if (!env.SESSION_SECRET) return response(error('CONFIG_INVALID', 'SESSION_SECRET 未配置'), 503);
+  const session = await sessionFor(request, env);
+  const limits = { limit: Number(env.DAILY_AI_ATTEMPT_LIMIT ?? 300), perSessionLimit: Number(env.DAILY_AI_ATTEMPT_LIMIT_PER_SESSION ?? 30) };
+  if (request.method === 'GET' && url.pathname === '/api/session') {
+    const stored = await quota(env, { action: 'read', sessionId: session.id, ...limits });
+    return response({ authenticated: true, ...await stored.json() }, 200, session.cookie ? { 'set-cookie': session.cookie } : undefined);
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plan') {
+    if (!allowed(request, env)) return response(error('ORIGIN_DENIED', '当前来源无法使用服务'), 403);
+    if (!env.OPENAI_API_KEY) return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用，本地编辑仍可继续'), 503);
+    let parsed; try { parsed = PlanRequestSchema.parse(await request.json()); } catch { return response(error('REQUEST_INVALID', '请求内容不符合编辑协议'), 400); }
+    const reserved = await quota(env, { action: 'reserve', sessionId: session.id, requestId: parsed.requestId, ...limits });
+    if (!reserved.ok) return reserved;
+    const started = Date.now();
+    try { const output = await plan(env, parsed); return response({ requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: 'pc-planner-1', rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: 1, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) }); } catch (cause) { console.warn('planner failed', cause); return response(error('PROVIDER_ERROR', '模型服务暂时不可用，可稍后重新请求'), 502); }
+  }
+  return response(error('NOT_FOUND', '接口不存在'), 404);
+} };

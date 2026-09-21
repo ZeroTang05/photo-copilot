@@ -15,6 +15,12 @@ importers:
         specifier: 5.9.2
         version: 5.9.2
 
+  apps/cloudflare:
+    dependencies:
+      zod:
+        specifier: 4.1.5
+        version: 4.1.5
+
   apps/gateway:
     dependencies:
       '@anthropic-ai/sdk':
