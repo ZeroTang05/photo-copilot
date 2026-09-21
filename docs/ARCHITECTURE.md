@@ -117,7 +117,7 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 - `.leftStack`：`grid-template-columns: 110px 1fr` + `grid-template-rows: minmax(0, 1fr) 240px`，缩略图跨两行、画布与副驾纵向分摊
 - `.controls`：`grid-row: 1 / span 2` 占据整个内容区高度
 
-参数面板按 SPEC 自有参数 + 设计图补充的"占位项"组织。`画笔`、`渐变`、`径向` 暂未在 `domain` schema 内，因此以禁用的"即将推出"占位控件呈现，等待参数加入 schema 后再启用。`白色色阶`、`黑色色阶`、`清晰度`、`自然饱和度` 已于 COLOR-GRADING.md 落地。
+参数面板按 SPEC 自有参数组织。`RegionSchema` 统一保存椭圆、线性渐变和画笔蒙版的数据；渲染器用局部区域 uniform 计算椭圆和渐变，用受限笔触点列表计算画笔蒙版。`白色色阶`、`黑色色阶`、`清晰度`、`自然饱和度` 均已在 COLOR-GRADING.md 落地。
 
 ## 部署设计
 

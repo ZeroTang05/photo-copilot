@@ -34,9 +34,16 @@ export const CropSchema = z.object({ x: finite(0, 1), y: finite(0, 1), width: fi
 export const TransformSchema = z.object({
   angleDeg: finite(-10, 10), crop: CropSchema, aspectLock: z.enum(['free', 'original', 'square', 'portrait4x5', 'landscape3x2', 'wide16x9']),
 }).strict();
+export const BrushDabSchema = z.object({ x: finite(0, 1), y: finite(0, 1) }).strict();
 export const RegionSchema = z.object({
   id: z.uuid(), label: z.string().trim().min(1).max(40), enabled: z.boolean(), centerX: finite(0, 1), centerY: finite(0, 1),
   radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1), mode: z.enum(['inside', 'outside']).default('inside'), adjustments: LocalAdjustmentsSchema,
+  // 三种局部蒙版共用同一组调整参数。线性渐变使用 angleDeg 和 feather，
+  // 画笔使用 brushDabs 与 brushRadius；椭圆继续使用两个半径。
+  shape: z.enum(['ellipse', 'linear', 'brush']).default('ellipse'),
+  angleDeg: finite(-180, 180).default(0),
+  brushRadius: finite(.01, .35).default(.06),
+  brushDabs: z.array(BrushDabSchema).max(32).default([]),
 }).strict();
 export const EditStateSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), rendererVersion: z.literal(RENDERER_VERSION), imageId: z.uuid(), revision: z.number().int().nonnegative(),

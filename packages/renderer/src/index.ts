@@ -14,7 +14,8 @@ const fragment = `#version 300 es
 precision highp float;
 uniform sampler2D u_image; uniform vec2 u_size; uniform vec2 u_output;
 uniform float u_exposure,u_contrast,u_highlights,u_shadows,u_whites,u_blacks,u_clarity,u_warmth,u_tint,u_vibrance,u_saturation,u_angle;
-uniform vec4 u_crop; uniform int u_count; uniform vec4 u_regions[4]; uniform vec4 u_local[4];
+uniform vec4 u_crop; uniform int u_count; uniform vec4 u_regions[4]; uniform vec4 u_local[4]; uniform vec4 u_meta[4];
+uniform int u_brushCount; uniform vec4 u_brushDabs[128];
 in vec2 v_uv; out vec4 outColor;
 vec3 decode(vec3 s){return mix(s/12.92,pow((s+.055)/1.055,vec3(2.4)),step(vec3(.04045),s));}
 vec3 encode(vec3 c){c=max(c,vec3(0));return clamp(mix(c*12.92,1.055*pow(c,vec3(1./2.4))-.055,step(vec3(.0031308),c)),0.,1.);}
@@ -55,11 +56,23 @@ void main(){
   for(int i=0;i<4;i++){
     if(i>=u_count) break;
     vec4 rg=u_regions[i];
-    // u_local.w 保存带符号的羽化值。零代表禁用，负值代表径向蒙版影响椭圆外部。
-    // 旧实现误用 radiusY 作为 enabled 标志，使默认 .2 半径的区域永远没有效果。
     float signedFeather=u_local[i].w; if(abs(signedFeather)<.001) continue;
-    vec2 d=(uv-rg.xy)/rg.zw; float dist=length(d); float feather=abs(signedFeather);
-    float mask=1.-smoothstep(1.-feather,1.,dist); if(signedFeather<0.) mask=1.-mask;
+    float shape=u_meta[i].x; float feather=abs(signedFeather); float mask=0.;
+    if(shape<.5){
+      vec2 d=(uv-rg.xy)/rg.zw; float dist=length(d);
+      mask=1.-smoothstep(1.-feather,1.,dist); if(signedFeather<0.) mask=1.-mask;
+    } else if(shape<1.5){
+      vec2 direction=vec2(cos(u_meta[i].y),sin(u_meta[i].y));
+      float position=dot(uv-rg.xy,direction);
+      mask=1.-smoothstep(-feather,feather,position);
+    } else {
+      for(int b=0;b<128;b++){
+        if(b>=u_brushCount) break; vec4 dab=u_brushDabs[b];
+        if(abs(dab.w-float(i))>.1) continue;
+        float distanceToDab=length(uv-dab.xy);
+        mask=max(mask,1.-smoothstep(dab.z*(1.-feather),dab.z,distanceToDab));
+      }
+    }
     vec3 local=tone(global,u_local[i].x,u_local[i].y,u_local[i].z); result+=mask*(local-global);
   }
   outColor=vec4(encode(clamp(result,0.,1.)),1.);
@@ -92,8 +105,19 @@ export class PhotoRenderer {
     gl.uniform2f(uniform('u_size'),state.sourceWidth,state.sourceHeight); gl.uniform2f(uniform('u_output'),this.canvas.width,this.canvas.height);
     gl.uniform1f(uniform('u_exposure'),g.exposureEV); gl.uniform1f(uniform('u_contrast'),g.contrast/100); gl.uniform1f(uniform('u_highlights'),g.highlights/100); gl.uniform1f(uniform('u_shadows'),g.shadows/100); gl.uniform1f(uniform('u_whites'),g.whites/100); gl.uniform1f(uniform('u_blacks'),g.blacks/100); gl.uniform1f(uniform('u_clarity'),g.clarity/100); gl.uniform1f(uniform('u_warmth'),g.warmth/100); gl.uniform1f(uniform('u_tint'),g.tint/100); gl.uniform1f(uniform('u_vibrance'),g.vibrance/100); gl.uniform1f(uniform('u_saturation'),g.saturation/100);
     gl.uniform1f(uniform('u_angle'),state.transform.angleDeg*Math.PI/180); const c=state.transform.crop; gl.uniform4f(uniform('u_crop'),c.x,c.y,c.width,c.height); gl.uniform1i(uniform('u_count'),state.regions.length);
-    const regions=new Float32Array(16), locals=new Float32Array(16); state.regions.forEach((region,index)=>{ const j=index*4; regions.set([region.centerX,region.centerY,region.radiusX,region.radiusY],j); const signedFeather=region.enabled ? (region.mode==='outside' ? -region.feather : region.feather) : 0; locals.set([region.adjustments.exposureEV,region.adjustments.highlights/100,region.adjustments.saturation/100,signedFeather],j); });
-    gl.uniform4fv(uniform('u_regions'),regions); gl.uniform4fv(uniform('u_local'),locals); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    const regions=new Float32Array(16), locals=new Float32Array(16), meta=new Float32Array(16), brushDabs=new Float32Array(128 * 4); let brushCount=0;
+    state.regions.forEach((region,index)=>{
+      const j=index*4;
+      regions.set([region.centerX,region.centerY,region.radiusX,region.radiusY],j);
+      const signedFeather=region.enabled && (region.shape !== 'brush' || region.brushDabs.length > 0) ? (region.mode==='outside' && region.shape==='ellipse' ? -region.feather : region.feather) : 0;
+      locals.set([region.adjustments.exposureEV,region.adjustments.highlights/100,region.adjustments.saturation/100,signedFeather],j);
+      meta.set([region.shape === 'ellipse' ? 0 : region.shape === 'linear' ? 1 : 2, region.angleDeg * Math.PI / 180, region.brushRadius, 0],j);
+      if(region.shape === 'brush') for(const dab of region.brushDabs) {
+        if(brushCount >= 128) break;
+        brushDabs.set([dab.x,dab.y,region.brushRadius,index],brushCount * 4); brushCount++;
+      }
+    });
+    gl.uniform4fv(uniform('u_regions'),regions); gl.uniform4fv(uniform('u_local'),locals); gl.uniform4fv(uniform('u_meta'),meta); gl.uniform1i(uniform('u_brushCount'),brushCount); gl.uniform4fv(uniform('u_brushDabs'),brushDabs); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
   async analysisBlob(state: EditState, maxEdge=1024) { const width=this.bitmap!.width, height=this.bitmap!.height, scale=Math.min(1,maxEdge/Math.max(width,height)); const canvas=document.createElement('canvas'); canvas.width=Math.round(width*scale); canvas.height=Math.round(height*scale); const renderer=new PhotoRenderer(canvas); await renderer.load(await this.toBlob()); renderer.render({ ...state, transform: { ...state.transform, angleDeg: 0, crop: {x:0,y:0,width:1,height:1} } },canvas.width,canvas.height); return new Promise<Blob>((resolve,reject)=>canvas.toBlob((blob)=>blob?resolve(blob):reject(new Error('缩略图编码失败')),'image/jpeg',.85)); }
   toBlob(quality=.92) { return new Promise<Blob>((resolve,reject)=>this.canvas.toBlob((blob)=>blob?resolve(blob):reject(new Error('JPEG 编码失败')),'image/jpeg',quality)); }

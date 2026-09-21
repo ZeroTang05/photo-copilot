@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
@@ -84,8 +84,10 @@ export function App() {
   const [compare, setCompare] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [copilotOpen, setCopilotOpen] = useState(true);
+  const [activeBrushRegionId, setActiveBrushRegionId] = useState<string>();
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
 
   const displayState = useMemo<EditState | undefined>(() => {
     if (!state) return undefined;
@@ -219,7 +221,7 @@ export function App() {
     commit({ ...state, transform: { ...state.transform, crop } });
   };
 
-  const handleAddRegion = (mode: Region['mode'] = 'inside') => {
+  const handleAddRegion = (shape: Region['shape'] = 'ellipse', mode: Region['mode'] = 'inside') => {
     if (!state || candidate) return;
     if (state.regions.length === 4) { setStatus('局部区域最多四个'); return; }
     const region = {
@@ -232,19 +234,78 @@ export function App() {
       radiusY: 0.2,
       feather: 0.35,
       mode,
+      shape,
+      angleDeg: 0,
+      brushRadius: 0.06,
+      brushDabs: [],
       adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
     };
     commit({ ...state, regions: [...state.regions, region] });
+    if (shape === 'brush') setActiveBrushRegionId(region.id);
   };
 
   const handleUpdateRegion = (nextRegion: Region) => {
     if (!state || candidate) return;
     commit({ ...state, regions: state.regions.map((region) => region.id === nextRegion.id ? nextRegion : region) });
+    if (activeBrushRegionId === nextRegion.id && nextRegion.shape !== 'brush') setActiveBrushRegionId(undefined);
   };
 
   const handleDeleteRegion = (regionId: string) => {
     if (!state || candidate) return;
     commit({ ...state, regions: state.regions.filter((region) => region.id !== regionId) });
+    if (activeBrushRegionId === regionId) setActiveBrushRegionId(undefined);
+  };
+
+  const pointFromCanvasEvent = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current || !state) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const crop = state.transform.crop;
+    const qx = crop.x + ((event.clientX - rect.left) / rect.width) * crop.width;
+    const qy = crop.y + ((event.clientY - rect.top) / rect.height) * crop.height;
+    const angle = state.transform.angleDeg * Math.PI / 180;
+    const x = Math.cos(angle) * (qx - .5) + Math.sin(angle) * (qy - .5) + .5;
+    const y = -Math.sin(angle) * (qx - .5) + Math.cos(angle) * (qy - .5) + .5;
+    return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+  };
+
+  const appendBrushDab = (point: { x: number; y: number }) => {
+    const stroke = brushStrokeRef.current;
+    if (!stroke || !state) return;
+    const region = state.regions.find((item) => item.id === stroke.regionId);
+    if (!region) return;
+    const minimumDistance = region.brushRadius * .3;
+    if (stroke.last && Math.hypot(point.x - stroke.last.x, point.y - stroke.last.y) < minimumDistance) return;
+    if (stroke.dabs.length >= 32) return;
+    stroke.dabs.push(point); stroke.last = point;
+  };
+
+  const handleBrushPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!state || candidate || !activeBrushRegionId) return;
+    const region = state.regions.find((item) => item.id === activeBrushRegionId);
+    const point = pointFromCanvasEvent(event);
+    if (!region || region.shape !== 'brush' || !point) return;
+    brushStrokeRef.current = { regionId: region.id, dabs: [...region.brushDabs], last: undefined };
+    appendBrushDab(point);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const handleBrushPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!brushStrokeRef.current) return;
+    const point = pointFromCanvasEvent(event);
+    if (point) appendBrushDab(point);
+  };
+
+  const finishBrushStroke = () => {
+    const stroke = brushStrokeRef.current;
+    brushStrokeRef.current = undefined;
+    if (!stroke || !state || candidate) return;
+    commit({ ...state, regions: state.regions.map((region) => region.id === stroke.regionId ? { ...region, brushDabs: stroke.dabs } : region) });
+  };
+
+  const handleResetCrop = () => {
+    if (!state || candidate) return;
+    commit({ ...state, transform: { ...state.transform, crop: { x: 0, y: 0, width: 1, height: 1 }, aspectLock: 'original' } });
   };
 
   const requestPlan = async (mode: 'auto' | 'followup') => {
@@ -364,8 +425,16 @@ export function App() {
             }}
           />
           <div className="canvasWrap" onWheel={(event) => { if (!state) return; event.preventDefault(); setZoom((value) => Math.min(200, Math.max(25, value + (event.deltaY < 0 ? 10 : -10)))); }}>
-            <canvas ref={canvasRef} style={{ transform: `scale(${zoom / 100})` }} aria-label="照片编辑画布" />
-            <p className="status">{compare ? '按住对比中' : status}</p>
+            <canvas
+              ref={canvasRef}
+              className={activeBrushRegionId ? 'brush-canvas' : undefined}
+              style={{ transform: `scale(${zoom / 100})` }}
+              aria-label={activeBrushRegionId ? '画笔蒙版画布，按住并拖动涂抹' : '照片编辑画布'}
+              onPointerDown={handleBrushPointerDown}
+              onPointerMove={handleBrushPointerMove}
+              onPointerUp={finishBrushStroke}
+              onPointerCancel={finishBrushStroke}
+            />
           </div>
           {copilotOpen && <CopilotPanel
             status={status}
@@ -396,6 +465,9 @@ export function App() {
           regionCount={state?.regions.length ?? 0}
           onUpdateRegion={handleUpdateRegion}
           onDeleteRegion={handleDeleteRegion}
+          activeBrushRegionId={activeBrushRegionId}
+          onPaintBrush={setActiveBrushRegionId}
+          onResetCrop={handleResetCrop}
         />
       </section>
     </main>

@@ -1,5 +1,5 @@
 import type { EditState, GlobalKey, Region } from '@photo-copilot/domain';
-import { Slider, formatSigned } from './Slider';
+import { Slider } from './Slider';
 
 interface ControlsPanelProps {
   state?: EditState;
@@ -10,10 +10,13 @@ interface ControlsPanelProps {
   onTransformChange: (patch: Partial<EditState['transform']>) => void;
   onCropChange: (key: 'x' | 'y' | 'width' | 'height', value: number) => void;
   onAspectLockChange: (value: EditState['transform']['aspectLock']) => void;
-  onAddRegion: (mode?: Region['mode']) => void;
+  onAddRegion: (shape?: Region['shape'], mode?: Region['mode']) => void;
   regionCount: number;
   onUpdateRegion: (region: Region) => void;
   onDeleteRegion: (regionId: string) => void;
+  activeBrushRegionId?: string;
+  onPaintBrush: (regionId?: string) => void;
+  onResetCrop: () => void;
 }
 
 const aspectOptions: Array<{ value: EditState['transform']['aspectLock']; label: string }> = [
@@ -31,31 +34,39 @@ const Chevron = () => (
   </svg>
 );
 
-const DisabledPlaceholder = ({ label }: { label: string }) => (
-  <div className="placeholder" aria-label={`${label}（即将推出）`}>
-    <span className="placeholder-label">{label}</span>
-    <span className="placeholder-tag">即将推出</span>
-  </div>
-);
-
-function RegionEditor({ region, disabled, onUpdate, onDelete }: { region: Region; disabled: boolean; onUpdate: (next: Region) => void; onDelete: () => void }) {
+function RegionEditor({ region, disabled, onUpdate, onDelete, activeBrushRegionId, onPaintBrush }: { region: Region; disabled: boolean; onUpdate: (next: Region) => void; onDelete: () => void; activeBrushRegionId?: string; onPaintBrush: (regionId?: string) => void }) {
   const change = <K extends keyof Region>(key: K, value: Region[K]) => onUpdate({ ...region, [key]: value });
   const adjustment = (key: keyof Region['adjustments'], value: number) => onUpdate({ ...region, adjustments: { ...region.adjustments, [key]: value } });
+  const isBrush = region.shape === 'brush';
+  const isLinear = region.shape === 'linear';
   return <div className="region-editor">
     <div className="region-editor-head">
       <input aria-label="区域名称" value={region.label} disabled={disabled} maxLength={40} onChange={(event) => change('label', event.target.value)} />
       <button className="region-delete" disabled={disabled} onClick={onDelete}>删除</button>
     </div>
     <label className="check"><input type="checkbox" checked={region.enabled} disabled={disabled} onChange={(event) => change('enabled', event.target.checked)} />启用蒙版</label>
-    <label className="select-row"><span>影响范围</span><select value={region.mode} disabled={disabled} onChange={(event) => change('mode', event.target.value as Region['mode'])}><option value="inside">椭圆内</option><option value="outside">椭圆外</option></select></label>
-    <Slider label="中心 X" value={region.centerX} min={0} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('centerX', value)} />
-    <Slider label="中心 Y" value={region.centerY} min={0} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('centerY', value)} />
-    <Slider label="横向范围" value={region.radiusX} min={0.01} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('radiusX', value)} />
-    <Slider label="纵向范围" value={region.radiusY} min={0.01} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('radiusY', value)} />
-    <Slider label="羽化" value={region.feather} min={0.05} max={1} step={0.01} disabled={disabled} onChange={(value) => change('feather', value)} />
-    <Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={0.01} disabled={disabled} onChange={(value) => adjustment('exposureEV', value)} formatValue={(value) => formatSigned(value, 2)} />
-    <Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={1} disabled={disabled} onChange={(value) => adjustment('highlights', value)} formatValue={(value) => formatSigned(value)} />
-    <Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={1} disabled={disabled} onChange={(value) => adjustment('saturation', value)} formatValue={(value) => formatSigned(value)} />
+    <label className="select-row"><span>蒙版类型</span><select value={region.shape} disabled={disabled} onChange={(event) => change('shape', event.target.value as Region['shape'])}><option value="ellipse">椭圆径向</option><option value="linear">线性渐变</option><option value="brush">画笔</option></select></label>
+    {region.shape === 'ellipse' && <label className="select-row"><span>影响范围</span><select value={region.mode} disabled={disabled} onChange={(event) => change('mode', event.target.value as Region['mode'])}><option value="inside">椭圆内</option><option value="outside">椭圆外</option></select></label>}
+    {isBrush ? <>
+      <button className={`brush-paint ${activeBrushRegionId === region.id ? 'active-tool' : ''}`} disabled={disabled} onClick={() => onPaintBrush(activeBrushRegionId === region.id ? undefined : region.id)}>{activeBrushRegionId === region.id ? '正在画面上涂抹' : '在画面上涂抹'}</button>
+      <p className="region-hint">点击后直接在照片上拖动。再次点击按钮结束涂抹。</p>
+      <Slider label="笔刷大小" value={region.brushRadius} min={.01} max={.35} step={.01} disabled={disabled} onChange={(value) => change('brushRadius', value)} />
+      <p className="region-hint">已记录 {region.brushDabs.length}/32 个笔触点。</p>
+    </> : <>
+      <Slider label={isLinear ? '渐变中心 X' : '中心 X'} value={region.centerX} min={0} max={1} step={.01} disabled={disabled} onChange={(value) => change('centerX', value)} />
+      <Slider label={isLinear ? '渐变中心 Y' : '中心 Y'} value={region.centerY} min={0} max={1} step={.01} disabled={disabled} onChange={(value) => change('centerY', value)} />
+      {isLinear ? <>
+        <Slider label="渐变方向" value={region.angleDeg} min={-180} max={180} step={1} unit="°" disabled={disabled} onChange={(value) => change('angleDeg', value)} />
+        <Slider label="过渡范围" value={region.feather} min={.05} max={1} step={.01} disabled={disabled} onChange={(value) => change('feather', value)} />
+      </> : <>
+        <Slider label="横向范围" value={region.radiusX} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value) => change('radiusX', value)} />
+        <Slider label="纵向范围" value={region.radiusY} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value) => change('radiusY', value)} />
+        <Slider label="羽化" value={region.feather} min={0.05} max={1} step={0.01} disabled={disabled} onChange={(value) => change('feather', value)} />
+      </>}
+    </>}
+    <Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={0.01} disabled={disabled} onChange={(value) => adjustment('exposureEV', value)} />
+    <Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={.1} disabled={disabled} onChange={(value) => adjustment('highlights', value)} />
+    <Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={.1} disabled={disabled} onChange={(value) => adjustment('saturation', value)} />
   </div>;
 }
 
@@ -85,12 +96,13 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onTransformChange({ angleDeg: value })}
-          formatValue={(value) => `${value.toFixed(1)}°`}
+          unit="°"
         />
         <label className="check">
           <input
             type="checkbox"
             checked={props.allowComposition}
+            disabled={!state || disabled}
             onChange={(event) => props.onAllowCompositionChange(event.target.checked)}
           />
           允许 AI 建议构图
@@ -103,6 +115,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.0001}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('x', value)}
+          resetValue={null}
         />
         <Slider
           label="裁切顶部"
@@ -112,6 +125,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.0001}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('y', value)}
+          resetValue={null}
         />
         <Slider
           label="裁切宽度"
@@ -121,6 +135,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.0001}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('width', value)}
+          resetValue={null}
         />
         <Slider
           label="裁切高度"
@@ -130,7 +145,10 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.0001}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('height', value)}
+          resetValue={null}
         />
+        <button className="crop-reset" disabled={!state || disabled} onClick={props.onResetCrop}>恢复完整照片</button>
+        <p className="crop-hint">先缩小“裁切宽度”或“裁切高度”，左侧与顶部才会有可移动空间。双击任何调色名称可归零。</p>
       </details>
 
       {/* 光线 */}
@@ -144,67 +162,60 @@ export function ControlsPanel(props: ControlsPanelProps) {
           step={0.01}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('exposureEV', value)}
-          formatValue={(value) => formatSigned(value, 2)}
         />
         <Slider
           label="对比度"
           value={state?.global.contrast ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('contrast', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="高光"
           value={state?.global.highlights ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('highlights', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="阴影"
           value={state?.global.shadows ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('shadows', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="白色色阶"
           value={state?.global.whites ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('whites', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="黑色色阶"
           value={state?.global.blacks ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('blacks', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="清晰度"
           value={state?.global.clarity ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('clarity', value)}
-          formatValue={(value) => formatSigned(value)}
         />
       </details>
 
@@ -217,10 +228,9 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={state?.global.warmth ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('warmth', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="色调"
@@ -228,30 +238,27 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={state?.global.tint ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('tint', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="自然饱和度"
           value={state?.global.vibrance ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('vibrance', value)}
-          formatValue={(value) => formatSigned(value)}
         />
         <Slider
           label="饱和度"
           value={state?.global.saturation ?? 0}
           min={-100}
           max={100}
-          step={1}
+          step={0.1}
           disabled={!state || disabled}
           onChange={(value) => props.onGlobalChange('saturation', value)}
-          formatValue={(value) => formatSigned(value)}
         />
       </details>
 
@@ -264,18 +271,18 @@ export function ControlsPanel(props: ControlsPanelProps) {
             className="add-region"
             onClick={(event) => {
               event.preventDefault();
-              props.onAddRegion();
+              props.onAddRegion('ellipse');
             }}
             disabled={!state || disabled || regionCount >= 4}
           >
             +
           </button>
         </summary>
-        {state?.regions.map((region) => <RegionEditor key={region.id} region={region} disabled={disabled} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} />)}
-        {regionCount === 0 && <p className="region-hint">添加椭圆蒙版后可独立调整局部光线与颜色。</p>}
-        <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('outside')}>添加椭圆外径向蒙版</button>
-        <DisabledPlaceholder label="画笔蒙版" />
-        <DisabledPlaceholder label="线性渐变" />
+        {state?.regions.map((region) => <RegionEditor key={region.id} region={region} disabled={disabled} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} activeBrushRegionId={props.activeBrushRegionId} onPaintBrush={props.onPaintBrush} />)}
+        {regionCount === 0 && <p className="region-hint">使用椭圆、线性渐变或画笔蒙版，独立调整局部光线与颜色。</p>}
+        <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('ellipse', 'outside')}>添加椭圆外径向蒙版</button>
+        <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('linear')}>添加线性渐变</button>
+        <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('brush')}>添加画笔蒙版</button>
       </details>
     </aside>
   );

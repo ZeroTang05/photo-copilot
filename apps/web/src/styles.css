@@ -287,16 +287,7 @@ canvas {
   background: transparent;
 }
 
-.status {
-  position: absolute;
-  bottom: 12px;
-  left: 24px;
-  right: 24px;
-  color: var(--text-mute);
-  font-size: 12px;
-  text-align: center;
-  margin: 0;
-}
+.brush-canvas { cursor: crosshair; }
 
 /* ============ Right controls panel ============ */
 
@@ -385,6 +376,27 @@ canvas {
   color: var(--text-mute);
 }
 
+.slider-scrub {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  border-radius: 3px;
+  padding: 4px 3px;
+  color: var(--text-mute);
+  cursor: ew-resize;
+  text-align: left;
+  font-size: 12px;
+}
+
+.slider-scrub:hover:not(:disabled), .slider-scrub:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text);
+  outline: none;
+}
+
 .slider input[type="range"] {
   appearance: none;
   -webkit-appearance: none;
@@ -433,27 +445,11 @@ canvas {
   width: 100%;
 }
 
-.placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--bg-elev);
-  border: 1px dashed var(--border-strong);
-  border-radius: 4px;
-  padding: 6px 10px;
-  margin: 10px 0;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-
-.placeholder-tag {
-  font-size: 10px;
-  color: var(--accent);
-  letter-spacing: 0.06em;
-  padding: 2px 6px;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-}
+.slider-number { position: relative; display: block; }
+.slider-number span { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--text-faint); font-size: 11px; pointer-events: none; }
+.slider-number:has(span) .slider-value { padding-right: 20px; }
+.crop-reset, .brush-paint { width: 100%; justify-content: center; padding: 6px 8px; font-size: 12px; }
+.crop-hint { color: var(--text-faint); line-height: 1.55; font-size: 11px; margin: 9px 0 0; }
 
 .region-editor { margin: 12px 0; padding: 12px 0 2px; border-top: 1px solid var(--border); }
 .region-editor-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
@@ -511,9 +507,11 @@ canvas {
 
 .copilot-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
   gap: 18px;
   height: calc(240px - 56px);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .copilot-empty {
@@ -535,6 +533,8 @@ canvas {
   border: 1px solid #353d44;
   border-radius: 8px;
   padding: 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .suggestion-thumb {
@@ -549,6 +549,14 @@ canvas {
   margin: 0 0 4px;
   font-size: 14px;
   color: var(--text);
+}
+
+.suggestion-text {
+  min-width: 0;
+  max-height: 142px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding-right: 4px;
 }
 
 .suggestion-text p {
@@ -580,6 +588,7 @@ canvas {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .copilot-input textarea {

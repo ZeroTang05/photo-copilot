@@ -21,6 +21,18 @@ describe('领域事务', () => {
       adjustments: { exposureEV: -.5, highlights: -20, saturation: 0 },
     });
     expect(region.mode).toBe('inside');
+    expect(region.shape).toBe('ellipse');
+  });
+
+  it('验证线性渐变与画笔蒙版的数据边界', () => {
+    const base = {
+      id: '8c7955ce-5f1e-4c37-b927-9460e7791c30', label: '天空', enabled: true,
+      centerX: .5, centerY: .5, radiusX: .2, radiusY: .2, feather: .35,
+      adjustments: { exposureEV: -.5, highlights: -20, saturation: 0 },
+    };
+    expect(RegionSchema.parse({ ...base, shape: 'linear', angleDeg: 90 }).shape).toBe('linear');
+    const brush = RegionSchema.parse({ ...base, shape: 'brush', brushRadius: .08, brushDabs: [{ x: .2, y: .4 }, { x: .3, y: .5 }] });
+    expect(brush.brushDabs).toHaveLength(2);
   });
 
   it('允许一个计划覆盖全部十一项全局调色参数', () => {
