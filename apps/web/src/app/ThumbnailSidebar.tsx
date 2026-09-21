@@ -1,5 +1,6 @@
 import type { ChangeEvent } from 'react';
 import type { ImageSlot } from '../state/editor';
+import { photoFileAccept } from '../lib/image-import';
 
 interface ThumbnailSidebarProps {
   images: ImageSlot[];
@@ -55,7 +56,7 @@ export function ThumbnailSidebar({ images, activeIndex, onSelect, onRemove, onIm
         </div>
       ))}
       <label className={`thumbnail-add ${slots.length === 0 ? 'thumbnail-empty' : ''}`} aria-label="添加照片">
-        <input type="file" accept="image/jpeg,image/png" multiple onChange={handleFile} />
+      <input type="file" accept={photoFileAccept} multiple onChange={handleFile} />
         <IconPlus />
         <span>添加</span>
       </label>

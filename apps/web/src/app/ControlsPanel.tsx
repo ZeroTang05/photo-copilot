@@ -6,17 +6,19 @@ interface ControlsPanelProps {
   disabled: boolean;
   allowComposition: boolean;
   onAllowCompositionChange: (next: boolean) => void;
-  onGlobalChange: (key: GlobalKey, value: number) => void;
-  onTransformChange: (patch: Partial<EditState['transform']>) => void;
-  onCropChange: (key: 'x' | 'y' | 'width' | 'height', value: number) => void;
+  onGlobalChange: (key: GlobalKey, value: number, transient?: boolean) => void;
+  onTransformChange: (patch: Partial<EditState['transform']>, transient?: boolean) => void;
+  onCropChange: (key: 'x' | 'y' | 'width' | 'height', value: number, transient?: boolean) => void;
   onAspectLockChange: (value: EditState['transform']['aspectLock']) => void;
   onAddRegion: (shape?: Region['shape'], mode?: Region['mode']) => void;
   regionCount: number;
-  onUpdateRegion: (region: Region) => void;
+  onUpdateRegion: (region: Region, transient?: boolean) => void;
   onDeleteRegion: (regionId: string) => void;
   activeBrushRegionId?: string;
   onPaintBrush: (regionId?: string) => void;
   onResetCrop: () => void;
+  onEditInteractionStart: () => void;
+  onEditInteractionEnd: () => void;
 }
 
 const aspectOptions: Array<{ value: EditState['transform']['aspectLock']; label: string }> = [
@@ -34,9 +36,9 @@ const Chevron = () => (
   </svg>
 );
 
-function RegionEditor({ region, disabled, onUpdate, onDelete, activeBrushRegionId, onPaintBrush }: { region: Region; disabled: boolean; onUpdate: (next: Region) => void; onDelete: () => void; activeBrushRegionId?: string; onPaintBrush: (regionId?: string) => void }) {
-  const change = <K extends keyof Region>(key: K, value: Region[K]) => onUpdate({ ...region, [key]: value });
-  const adjustment = (key: keyof Region['adjustments'], value: number) => onUpdate({ ...region, adjustments: { ...region.adjustments, [key]: value } });
+function RegionEditor({ region, disabled, onUpdate, onDelete, activeBrushRegionId, onPaintBrush }: { region: Region; disabled: boolean; onUpdate: (next: Region, transient?: boolean) => void; onDelete: () => void; activeBrushRegionId?: string; onPaintBrush: (regionId?: string) => void }) {
+  const change = <K extends keyof Region>(key: K, value: Region[K], transient?: boolean) => onUpdate({ ...region, [key]: value }, transient);
+  const adjustment = (key: keyof Region['adjustments'], value: number, transient?: boolean) => onUpdate({ ...region, adjustments: { ...region.adjustments, [key]: value } }, transient);
   const isBrush = region.shape === 'brush';
   const isLinear = region.shape === 'linear';
   return <div className="region-editor">
@@ -50,23 +52,23 @@ function RegionEditor({ region, disabled, onUpdate, onDelete, activeBrushRegionI
     {isBrush ? <>
       <button className={`brush-paint ${activeBrushRegionId === region.id ? 'active-tool' : ''}`} disabled={disabled} onClick={() => onPaintBrush(activeBrushRegionId === region.id ? undefined : region.id)}>{activeBrushRegionId === region.id ? '正在画面上涂抹' : '在画面上涂抹'}</button>
       <p className="region-hint">点击后直接在照片上拖动。再次点击按钮结束涂抹。</p>
-      <Slider label="笔刷大小" value={region.brushRadius} min={.01} max={.35} step={.01} disabled={disabled} onChange={(value) => change('brushRadius', value)} />
+      <Slider label="笔刷大小" value={region.brushRadius} min={.01} max={.35} step={.01} disabled={disabled} onChange={(value, transient) => change('brushRadius', value, transient)} />
       <p className="region-hint">已记录 {region.brushDabs.length}/32 个笔触点。</p>
     </> : <>
-      <Slider label={isLinear ? '渐变中心 X' : '中心 X'} value={region.centerX} min={0} max={1} step={.01} disabled={disabled} onChange={(value) => change('centerX', value)} />
-      <Slider label={isLinear ? '渐变中心 Y' : '中心 Y'} value={region.centerY} min={0} max={1} step={.01} disabled={disabled} onChange={(value) => change('centerY', value)} />
+      <Slider label={isLinear ? '渐变中心 X' : '中心 X'} value={region.centerX} min={0} max={1} step={.01} disabled={disabled} onChange={(value, transient) => change('centerX', value, transient)} />
+      <Slider label={isLinear ? '渐变中心 Y' : '中心 Y'} value={region.centerY} min={0} max={1} step={.01} disabled={disabled} onChange={(value, transient) => change('centerY', value, transient)} />
       {isLinear ? <>
-        <Slider label="渐变方向" value={region.angleDeg} min={-180} max={180} step={1} unit="°" disabled={disabled} onChange={(value) => change('angleDeg', value)} />
-        <Slider label="过渡范围" value={region.feather} min={.05} max={1} step={.01} disabled={disabled} onChange={(value) => change('feather', value)} />
+        <Slider label="渐变方向" value={region.angleDeg} min={-180} max={180} step={1} unit="°" disabled={disabled} onChange={(value, transient) => change('angleDeg', value, transient)} />
+        <Slider label="过渡范围" value={region.feather} min={.05} max={1} step={.01} disabled={disabled} onChange={(value, transient) => change('feather', value, transient)} />
       </> : <>
-        <Slider label="横向范围" value={region.radiusX} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value) => change('radiusX', value)} />
-        <Slider label="纵向范围" value={region.radiusY} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value) => change('radiusY', value)} />
-        <Slider label="羽化" value={region.feather} min={0.05} max={1} step={0.01} disabled={disabled} onChange={(value) => change('feather', value)} />
+        <Slider label="横向范围" value={region.radiusX} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value, transient) => change('radiusX', value, transient)} />
+        <Slider label="纵向范围" value={region.radiusY} min={0.01} max={1} step={.01} disabled={disabled} onChange={(value, transient) => change('radiusY', value, transient)} />
+        <Slider label="羽化" value={region.feather} min={0.05} max={1} step={0.01} disabled={disabled} onChange={(value, transient) => change('feather', value, transient)} />
       </>}
     </>}
-    <Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={0.01} disabled={disabled} onChange={(value) => adjustment('exposureEV', value)} />
-    <Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={.1} disabled={disabled} onChange={(value) => adjustment('highlights', value)} />
-    <Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={.1} disabled={disabled} onChange={(value) => adjustment('saturation', value)} />
+    <Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={0.01} disabled={disabled} onChange={(value, transient) => adjustment('exposureEV', value, transient)} />
+    <Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={.1} disabled={disabled} onChange={(value, transient) => adjustment('highlights', value, transient)} />
+    <Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={.1} disabled={disabled} onChange={(value, transient) => adjustment('saturation', value, transient)} />
   </div>;
 }
 
@@ -74,7 +76,14 @@ export function ControlsPanel(props: ControlsPanelProps) {
   const { state, disabled, regionCount } = props;
   const crop = state?.transform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
   return (
-    <aside className="controls">
+    <aside
+      className="controls"
+      onPointerDownCapture={(event) => {
+        if (event.target instanceof HTMLElement && (event.target.closest('.slider-scrub') || event.target.matches('input[type="range"]'))) props.onEditInteractionStart();
+      }}
+      onPointerUpCapture={() => props.onEditInteractionEnd()}
+      onPointerCancelCapture={() => props.onEditInteractionEnd()}
+    >
       {/* 构图 */}
       <details open>
         <summary><Chevron /><span>构图</span></summary>
@@ -91,12 +100,11 @@ export function ControlsPanel(props: ControlsPanelProps) {
         <Slider
           label="旋转"
           value={state?.transform.angleDeg ?? 0}
-          min={-10}
-          max={10}
+          min={-180}
+          max={180}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onTransformChange({ angleDeg: value })}
-          unit="°"
+          onChange={(value, transient) => props.onTransformChange({ angleDeg: value }, transient)}
         />
         <label className="check">
           <input
@@ -108,33 +116,13 @@ export function ControlsPanel(props: ControlsPanelProps) {
           允许 AI 建议构图
         </label>
         <Slider
-          label="裁切左侧"
-          value={crop.x}
-          min={0}
-          max={Math.max(0, 1 - crop.width)}
-          step={0.01}
-          disabled={!state || disabled}
-          onChange={(value) => props.onCropChange('x', value)}
-          resetValue={null}
-        />
-        <Slider
-          label="裁切顶部"
-          value={crop.y}
-          min={0}
-          max={Math.max(0, 1 - crop.height)}
-          step={0.01}
-          disabled={!state || disabled}
-          onChange={(value) => props.onCropChange('y', value)}
-          resetValue={null}
-        />
-        <Slider
           label="裁切宽度"
           value={crop.width}
           min={0.01}
           max={Math.max(0.01, 1 - crop.x)}
           step={0.01}
           disabled={!state || disabled}
-          onChange={(value) => props.onCropChange('width', value)}
+          onChange={(value, transient) => props.onCropChange('width', value, transient)}
           resetValue={null}
         />
         <Slider
@@ -144,11 +132,30 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={Math.max(0.01, 1 - crop.y)}
           step={0.01}
           disabled={!state || disabled}
-          onChange={(value) => props.onCropChange('height', value)}
+          onChange={(value, transient) => props.onCropChange('height', value, transient)}
+          resetValue={null}
+        />
+        <Slider
+          label="裁切左侧"
+          value={crop.x}
+          min={0}
+          max={Math.max(0, 1 - crop.width)}
+          step={0.01}
+          disabled={!state || disabled}
+          onChange={(value, transient) => props.onCropChange('x', value, transient)}
+          resetValue={null}
+        />
+        <Slider
+          label="裁切顶部"
+          value={crop.y}
+          min={0}
+          max={Math.max(0, 1 - crop.height)}
+          step={0.01}
+          disabled={!state || disabled}
+          onChange={(value, transient) => props.onCropChange('y', value, transient)}
           resetValue={null}
         />
         <button className="crop-reset" disabled={!state || disabled} onClick={props.onResetCrop}>恢复完整照片</button>
-        <p className="crop-hint">先缩小“裁切宽度”或“裁切高度”，左侧与顶部才会有可移动空间。双击任何调色名称可归零。</p>
       </details>
 
       {/* 光线 */}
@@ -161,7 +168,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={2}
           step={0.01}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('exposureEV', value)}
+          onChange={(value, transient) => props.onGlobalChange('exposureEV', value, transient)}
         />
         <Slider
           label="对比度"
@@ -170,7 +177,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('contrast', value)}
+          onChange={(value, transient) => props.onGlobalChange('contrast', value, transient)}
         />
         <Slider
           label="高光"
@@ -179,7 +186,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('highlights', value)}
+          onChange={(value, transient) => props.onGlobalChange('highlights', value, transient)}
         />
         <Slider
           label="阴影"
@@ -188,7 +195,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('shadows', value)}
+          onChange={(value, transient) => props.onGlobalChange('shadows', value, transient)}
         />
         <Slider
           label="白色色阶"
@@ -197,7 +204,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('whites', value)}
+          onChange={(value, transient) => props.onGlobalChange('whites', value, transient)}
         />
         <Slider
           label="黑色色阶"
@@ -206,7 +213,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('blacks', value)}
+          onChange={(value, transient) => props.onGlobalChange('blacks', value, transient)}
         />
         <Slider
           label="清晰度"
@@ -215,7 +222,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('clarity', value)}
+          onChange={(value, transient) => props.onGlobalChange('clarity', value, transient)}
         />
       </details>
 
@@ -230,7 +237,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('warmth', value)}
+          onChange={(value, transient) => props.onGlobalChange('warmth', value, transient)}
         />
         <Slider
           label="色调"
@@ -240,7 +247,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('tint', value)}
+          onChange={(value, transient) => props.onGlobalChange('tint', value, transient)}
         />
         <Slider
           label="自然饱和度"
@@ -249,7 +256,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('vibrance', value)}
+          onChange={(value, transient) => props.onGlobalChange('vibrance', value, transient)}
         />
         <Slider
           label="饱和度"
@@ -258,7 +265,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           max={100}
           step={0.1}
           disabled={!state || disabled}
-          onChange={(value) => props.onGlobalChange('saturation', value)}
+          onChange={(value, transient) => props.onGlobalChange('saturation', value, transient)}
         />
       </details>
 

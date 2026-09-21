@@ -1,5 +1,6 @@
 import type { ChangeEvent } from 'react';
 import type { PlanPayload } from '@photo-copilot/domain';
+import { photoFileAccept } from '../lib/image-import';
 
 interface CopilotPanelProps {
   status: string;
@@ -15,6 +16,9 @@ interface CopilotPanelProps {
   candidate?: PlanPayload;
   onApply: () => void;
   onDiscard: () => void;
+  referencePhoto?: { name: string; thumbnail: string };
+  onReferenceImport: (file: File) => void;
+  onRemoveReference: () => void;
 }
 
 const IconClose = () => (
@@ -41,6 +45,11 @@ export function CopilotPanel(props: CopilotPanelProps) {
   const charCount = props.instruction.length;
   const charLimit = 500;
   const handleInstruction = (event: ChangeEvent<HTMLTextAreaElement>) => props.setInstruction(event.target.value.slice(0, charLimit));
+  const handleReference = (event: ChangeEvent<HTMLInputElement>) => {
+    const [file] = Array.from(event.target.files ?? []);
+    if (file) props.onReferenceImport(file);
+    event.target.value = '';
+  };
   return (
     <section className="copilot">
       <div className="copilot-header">
@@ -66,6 +75,17 @@ export function CopilotPanel(props: CopilotPanelProps) {
           </div>
         )}
         <div className="copilot-input">
+          <div className="reference-row">
+            <label className="reference-upload" title="上传一张参考图，让 AI 参考其调色风格">
+              <input type="file" accept={photoFileAccept} disabled={!props.hasState || props.busy} onChange={handleReference} />
+              <span>添加参考图</span>
+            </label>
+            {props.referencePhoto && <div className="reference-chip">
+              <img src={props.referencePhoto.thumbnail} alt={`参考图：${props.referencePhoto.name}`} />
+              <span title={props.referencePhoto.name}>{props.referencePhoto.name}</span>
+              <button type="button" aria-label="移除参考图" title="移除参考图" disabled={props.busy} onClick={props.onRemoveReference}>×</button>
+            </div>}
+          </div>
           <textarea
             value={props.instruction}
             maxLength={charLimit}

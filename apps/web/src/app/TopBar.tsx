@@ -1,4 +1,7 @@
 import { useState, type ChangeEvent } from 'react';
+import { photoFileAccept } from '../lib/image-import';
+
+export type ExportFormat = 'jpeg' | 'png' | 'webp' | 'avif' | 'tiff';
 
 interface TopBarProps {
   hasState: boolean;
@@ -13,11 +16,14 @@ interface TopBarProps {
   onCompareEnd: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
-  onZoomPreset: (value: number) => void;
   onFit: () => void;
-  onExport: () => void;
-  copilotOpen: boolean;
-  onToggleCopilot: () => void;
+  onExport: (format: ExportFormat) => void;
+  leftPanelOpen: boolean;
+  rightPanelOpen: boolean;
+  bottomPanelOpen: boolean;
+  onToggleLeftPanel: () => void;
+  onToggleRightPanel: () => void;
+  onToggleBottomPanel: () => void;
 }
 
 const IconImport = () => (
@@ -71,7 +77,7 @@ const IconExport = () => (
 );
 
 export function TopBar(props: TopBarProps) {
-  const [showZoomMenu, setShowZoomMenu] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('jpeg');
   const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) props.onImport(files);
@@ -80,7 +86,7 @@ export function TopBar(props: TopBarProps) {
   return (
     <header className="toolbar">
       <label className="import">
-        <input type="file" accept="image/jpeg,image/png" multiple onChange={handleFile} />
+        <input type="file" accept={photoFileAccept} multiple onChange={handleFile} />
         <IconImport />
         <span>导入</span>
       </label>
@@ -97,21 +103,30 @@ export function TopBar(props: TopBarProps) {
         <IconCompare />
         <span>对比</span>
       </button>
-      <button className={`tool ${props.copilotOpen ? 'active-tool' : ''}`} onClick={props.onToggleCopilot} title="显示或隐藏 AI 副驾">
-        <span>AI 副驾</span>
-      </button>
+      <div className="panel-switcher" aria-label="工作区面板">
+        <button className={`tool ${props.leftPanelOpen ? 'active-tool' : ''}`} aria-pressed={props.leftPanelOpen} onClick={props.onToggleLeftPanel} title="显示或隐藏缩略图栏">缩略图</button>
+        <button className={`tool ${props.rightPanelOpen ? 'active-tool' : ''}`} aria-pressed={props.rightPanelOpen} onClick={props.onToggleRightPanel} title="显示或隐藏调整栏">调整</button>
+        <button className={`tool ${props.bottomPanelOpen ? 'active-tool' : ''}`} aria-pressed={props.bottomPanelOpen} onClick={props.onToggleBottomPanel} title="显示或隐藏 AI 副驾">AI 副驾</button>
+      </div>
       <div className="toolbar-spacer" />
       <div className="zoom">
         <button className="zoom-btn" onClick={props.onZoomOut} title="缩小">−</button>
         <button className="zoom-fit" onClick={props.onFit} title="适应窗口">{props.zoom}%</button>
         <button className="zoom-btn" onClick={props.onZoomIn} title="放大">+</button>
-        <button className="zoom-menu" onClick={() => setShowZoomMenu((value) => !value)} title="缩放选项" aria-label="缩放选项">▾</button>
-        {showZoomMenu && <div className="zoom-popover">{[25, 50, 100, 150, 200].map((value) => <button key={value} onClick={() => { props.onZoomPreset(value); setShowZoomMenu(false); }}>{value}%</button>)}</div>}
       </div>
-      <button className="export" disabled={!props.hasState || props.exporting} onClick={props.onExport}>
-        <IconExport />
-        <span>{props.exporting ? '导出中' : '导出'}</span>
-      </button>
+      <div className="export-group">
+        <select className="export-format" aria-label="导出格式" value={exportFormat} disabled={!props.hasState || props.exporting} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>
+          <option value="jpeg">JPEG</option>
+          <option value="png">PNG</option>
+          <option value="webp">WebP</option>
+          <option value="avif">AVIF</option>
+          <option value="tiff">TIFF</option>
+        </select>
+        <button className="export" disabled={!props.hasState || props.exporting} onClick={() => props.onExport(exportFormat)}>
+          <IconExport />
+          <span>{props.exporting ? '导出中' : '导出'}</span>
+        </button>
+      </div>
     </header>
   );
 }

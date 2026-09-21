@@ -1,17 +1,51 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import * as UTIF from 'utif2';
 import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
-import { TopBar } from './TopBar';
+import { TopBar, type ExportFormat } from './TopBar';
 import { ThumbnailSidebar } from './ThumbnailSidebar';
 import { ControlsPanel } from './ControlsPanel';
 import { CopilotPanel } from './CopilotPanel';
+import { decodePhotoFile, isSupportedPhotoFile } from '../lib/image-import';
 
 function uid() { return crypto.randomUUID(); }
 
-async function normalizedBlob(file: File): Promise<Blob> {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+const MAX_IMAGE_PIXELS = 100_000_000;
+const MAX_IMAGE_EDGE = 16_384;
+const MAX_SOURCE_FILE_BYTES = 100 * 1024 * 1024;
+const CANVAS_EXPORT_FORMATS = {
+  jpeg: { mime: 'image/jpeg' as const, extension: 'jpg', label: 'JPEG', quality: 0.92 },
+  png: { mime: 'image/png' as const, extension: 'png', label: 'PNG', quality: 1 },
+  webp: { mime: 'image/webp' as const, extension: 'webp', label: 'WebP', quality: 0.92 },
+  avif: { mime: 'image/avif' as const, extension: 'avif', label: 'AVIF', quality: 0.92 },
+};
+
+interface ReferencePhoto {
+  name: string;
+  blob: Blob;
+  thumbnail: string;
+}
+
+// 旋转时取能完全填满当前画幅的最大内接矩形，避免边角复制或拉伸。
+function rotationAutoCropScale(sourceWidth: number, sourceHeight: number, crop: EditState['transform']['crop'], angleDeg: number) {
+  const cropAspect = (sourceWidth * crop.width) / (sourceHeight * crop.height);
+  const radians = angleDeg * Math.PI / 180;
+  const cosine = Math.abs(Math.cos(radians));
+  const sine = Math.abs(Math.sin(radians));
+  return Math.min(cropAspect / (cosine * cropAspect + sine), 1 / (sine * cropAspect + cosine));
+}
+
+async function imageDimensions(source: Blob) {
+  const bitmap = await createImageBitmap(source, { imageOrientation: 'from-image' });
+  const dimensions = { width: bitmap.width, height: bitmap.height };
+  bitmap.close();
+  return dimensions;
+}
+
+async function normalizedBlob(source: Blob): Promise<Blob> {
+  const bitmap = await createImageBitmap(source, { imageOrientation: 'from-image' });
   const canvas = document.createElement('canvas');
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
@@ -61,11 +95,16 @@ async function toBase64(blob: Blob): Promise<string> {
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<PhotoRenderer | undefined>(undefined);
+  const renderedImageIdRef = useRef<string | undefined>(undefined);
+  const renderSizeRef = useRef<{ width: number; height: number } | undefined>(undefined);
   const currentSlot = useEditor((state) => activeSlot(state));
   const images = useEditor((state) => state.images);
   const activeIndex = useEditor((state) => state.activeIndex);
   const candidate = useEditor((state) => state.candidate);
   const commit = useEditor((state) => state.commit);
+  const beginInteraction = useEditor((state) => state.beginInteraction);
+  const preview = useEditor((state) => state.preview);
+  const endInteraction = useEditor((state) => state.endInteraction);
   const undo = useEditor((state) => state.undo);
   const redo = useEditor((state) => state.redo);
   const setCandidate = useEditor((state) => state.setCandidate);
@@ -78,14 +117,16 @@ export function App() {
 
   const [status, setStatus] = useState('导入一张 JPEG 或 PNG 开始编辑');
   const [instruction, setInstruction] = useState('');
+  const [referencePhoto, setReferencePhoto] = useState<ReferencePhoto>();
   const [allowComposition, setAllowComposition] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [compare, setCompare] = useState(false);
   const [zoom, setZoom] = useState(100);
-  const [copilotOpen, setCopilotOpen] = useState(true);
   const [activeBrushRegionId, setActiveBrushRegionId] = useState<string>();
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [leftPanelOpen, setLeftPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
@@ -104,16 +145,23 @@ export function App() {
   }, [state, candidate, allowComposition]);
 
   const draw = useCallback(() => {
-    if (!displayState || !rendererRef.current || !canvasRef.current) return;
+    if (!displayState || renderedImageIdRef.current !== displayState.imageId || !rendererRef.current || !canvasRef.current) return;
     const parent = canvasRef.current.parentElement;
     const availableWidth = (parent?.clientWidth ?? 900) * 0.92;
     const availableHeight = (parent?.clientHeight ?? 600) * 0.87;
     const aspect = (displayState.sourceWidth * displayState.transform.crop.width) / (displayState.sourceHeight * displayState.transform.crop.height);
     const width = Math.min(availableWidth, availableHeight * aspect);
+    renderSizeRef.current = { width, height: width / aspect };
     rendererRef.current.render(displayState, width, width / aspect);
   }, [displayState]);
 
   useEffect(() => { draw(); }, [draw]);
+  // 面板显隐会改变画布可用空间，等浏览器完成本次布局后再按新尺寸重绘。
+  useEffect(() => {
+    const frame = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(frame);
+  }, [bottomPanelOpen, draw, leftPanelOpen, rightPanelOpen]);
+
   useEffect(() => {
     const handler = () => draw();
     window.addEventListener('resize', handler);
@@ -132,41 +180,64 @@ export function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [redo, undo]);
 
-  // Switch renderer to the active image's blob whenever activeIndex changes.
+  // 组件卸载时释放当前的 WebGL 资源；切换图片时由下方效果在新图就绪后替换它。
+  useEffect(() => () => rendererRef.current?.dispose(), []);
+
+  // 先在后台解码新图，确认可用后才替换画布。旧图保持原样，避免切换时闪烁。
   useEffect(() => {
-    if (!currentSlot || !canvasRef.current) return;
-    rendererRef.current?.dispose();
-    const r = new PhotoRenderer(canvasRef.current);
-    rendererRef.current = r;
-    void r.load(currentSlot.blob).then(() => draw());
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!currentSlot) {
+      rendererRef.current?.dispose();
+      rendererRef.current = undefined;
+      renderedImageIdRef.current = undefined;
+      canvas.width = 1;
+      canvas.height = 1;
+      setActiveBrushRegionId(undefined);
+      return;
+    }
+    const imageId = currentSlot.state.imageId;
+    let cancelled = false;
+    void createImageBitmap(currentSlot.blob, { imageOrientation: 'from-image' }).then((bitmap) => {
+      if (cancelled) { bitmap.close(); return; }
+      const previous = rendererRef.current;
+      const renderer = new PhotoRenderer(canvas);
+      renderer.loadBitmap(bitmap);
+      if (cancelled) { renderer.dispose(); return; }
+      rendererRef.current = renderer;
+      renderedImageIdRef.current = imageId;
+      previous?.dispose();
+      draw();
+    }).catch(() => {
+      if (!cancelled) setStatus('图片渲染初始化失败');
+    });
+    return () => { cancelled = true; };
   }, [currentSlot?.blob]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFit = useCallback(() => { setZoom(100); draw(); }, [draw]);
 
   const handleCompareStart = useCallback(() => {
-    if (!state) return;
-    setCompare(true);
-    rendererRef.current?.render({ ...state, global: defaultGlobal(), regions: [] });
+    const size = renderSizeRef.current;
+    if (!state || !size || !rendererRef.current) return;
+    rendererRef.current.render({ ...state, global: defaultGlobal(), regions: [] }, size.width, size.height);
   }, [state]);
 
   const handleCompareEnd = useCallback(() => {
-    setCompare(false);
     draw();
   }, [draw]);
 
   const handleImport = async (file: File) => {
-    if (!['image/jpeg', 'image/png'].includes(file.type)) { setStatus('仅支持 JPEG 或 PNG 图片'); return; }
-    if (file.size > 25 * 1024 * 1024) { setStatus('图片超过 25 MiB 限制'); return; }
+    if (!isSupportedPhotoFile(file)) { setStatus('仅支持 JPEG、PNG、WebP、AVIF、GIF、TIFF 或相机 RAW 图片'); return; }
+    if (file.size > MAX_SOURCE_FILE_BYTES) { setStatus('图片超过 100 MiB 限制'); return; }
     try {
-      setStatus('正在解码和规范化图片');
-      const blob = await normalizedBlob(file);
-      const bitmap = await createImageBitmap(blob);
-      if (bitmap.width * bitmap.height > 24_000_000 || bitmap.width > 8192 || bitmap.height > 8192 || bitmap.width < 64 || bitmap.height < 64) {
-        bitmap.close();
-        throw new Error('图片尺寸不在 64 像素至 2400 万像素范围内');
+      setStatus('正在浏览器内解码和规范化图片');
+      const decoded = await decodePhotoFile(file);
+      const dimensions = await imageDimensions(decoded);
+      if (dimensions.width * dimensions.height > MAX_IMAGE_PIXELS || dimensions.width > MAX_IMAGE_EDGE || dimensions.height > MAX_IMAGE_EDGE || dimensions.width < 64 || dimensions.height < 64) {
+        throw new Error('图片尺寸需在 64 像素至 1 亿像素以内，单边不超过 16384 像素');
       }
-      const next = createInitialState(uid(), bitmap.width, bitmap.height);
-      bitmap.close();
+      const blob = await normalizedBlob(decoded);
+      const next = createInitialState(uid(), dimensions.width, dimensions.height);
       const thumbnail = await thumbnailFromBlob(blob);
       addImage({
         blob,
@@ -189,15 +260,41 @@ export function App() {
     })();
   };
 
-  const handleGlobalChange = (key: GlobalKey, value: number) => {
-    if (!state || candidate) return;
-    controllerRef.current?.abort();
-    commit({ ...state, global: { ...state.global, [key]: value } });
+  /** 参考图只用于 AI 理解目标风格，不会加入当前编辑队列。 */
+  const handleReferenceImport = async (file: File) => {
+    if (!isSupportedPhotoFile(file)) { setStatus('参考图格式不受支持'); return; }
+    if (file.size > MAX_SOURCE_FILE_BYTES) { setStatus('参考图超过 100 MiB 限制'); return; }
+    try {
+      controllerRef.current?.abort();
+      setStatus('正在准备参考图');
+      const decoded = await decodePhotoFile(file);
+      const dimensions = await imageDimensions(decoded);
+      if (dimensions.width * dimensions.height > MAX_IMAGE_PIXELS || dimensions.width > MAX_IMAGE_EDGE || dimensions.height > MAX_IMAGE_EDGE || dimensions.width < 64 || dimensions.height < 64) {
+        throw new Error('参考图尺寸需在 64 像素至 1 亿像素以内，单边不超过 16384 像素');
+      }
+      const blob = await normalizedBlob(decoded);
+      const thumbnail = await thumbnailFromBlob(blob, 160);
+      setReferencePhoto({ name: file.name, blob, thumbnail });
+      setCandidate();
+      setStatus('参考图已添加。AI 会参考它的色彩与氛围');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '参考图无法解码');
+    }
   };
 
-  const handleTransformChange = (patch: Partial<EditState['transform']>) => {
+  const handleGlobalChange = (key: GlobalKey, value: number, transient = false) => {
     if (!state || candidate) return;
-    commit({ ...state, transform: { ...state.transform, ...patch } });
+    controllerRef.current?.abort();
+    const next = { ...state, global: { ...state.global, [key]: value } };
+    if (transient) preview(next);
+    else commit(next);
+  };
+
+  const handleTransformChange = (patch: Partial<EditState['transform']>, transient = false) => {
+    if (!state || candidate) return;
+    const next = { ...state, transform: { ...state.transform, ...patch } };
+    if (transient) preview(next);
+    else commit(next);
   };
 
   const handleAspectLockChange = (value: EditState['transform']['aspectLock']) => {
@@ -223,12 +320,14 @@ export function App() {
     commit({ ...state, transform: { ...state.transform, aspectLock: value, crop } });
   };
 
-  const handleCropChange = (key: 'x' | 'y' | 'width' | 'height', value: number) => {
+  const handleCropChange = (key: 'x' | 'y' | 'width' | 'height', value: number, transient = false) => {
     if (!state || candidate) return;
     const crop = { ...state.transform.crop, [key]: value };
     crop.width = Math.min(crop.width, 1 - crop.x);
     crop.height = Math.min(crop.height, 1 - crop.y);
-    commit({ ...state, transform: { ...state.transform, crop } });
+    const next = { ...state, transform: { ...state.transform, crop } };
+    if (transient) preview(next);
+    else commit(next);
   };
 
   const handleAddRegion = (shape: Region['shape'] = 'ellipse', mode: Region['mode'] = 'inside') => {
@@ -254,9 +353,11 @@ export function App() {
     if (shape === 'brush') setActiveBrushRegionId(region.id);
   };
 
-  const handleUpdateRegion = (nextRegion: Region) => {
+  const handleUpdateRegion = (nextRegion: Region, transient = false) => {
     if (!state || candidate) return;
-    commit({ ...state, regions: state.regions.map((region) => region.id === nextRegion.id ? nextRegion : region) });
+    const next = { ...state, regions: state.regions.map((region) => region.id === nextRegion.id ? nextRegion : region) };
+    if (transient) preview(next);
+    else commit(next);
     if (activeBrushRegionId === nextRegion.id && nextRegion.shape !== 'brush') setActiveBrushRegionId(undefined);
   };
 
@@ -270,11 +371,13 @@ export function App() {
     if (!canvasRef.current || !state) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const crop = state.transform.crop;
-    const qx = crop.x + ((event.clientX - rect.left) / rect.width) * crop.width;
-    const qy = crop.y + ((event.clientY - rect.top) / rect.height) * crop.height;
+    const cropAspect = (state.sourceWidth * crop.width) / (state.sourceHeight * crop.height);
+    const autoScale = rotationAutoCropScale(state.sourceWidth, state.sourceHeight, crop, state.transform.angleDeg);
+    const centeredX = (((event.clientX - rect.left) / rect.width) - .5) * autoScale * cropAspect;
+    const centeredY = (((event.clientY - rect.top) / rect.height) - .5) * autoScale;
     const angle = state.transform.angleDeg * Math.PI / 180;
-    const x = Math.cos(angle) * (qx - .5) + Math.sin(angle) * (qy - .5) + .5;
-    const y = -Math.sin(angle) * (qx - .5) + Math.cos(angle) * (qy - .5) + .5;
+    const x = crop.x + crop.width * .5 + ((Math.cos(angle) * centeredX + Math.sin(angle) * centeredY) / cropAspect) * crop.width;
+    const y = crop.y + crop.height * .5 + (-Math.sin(angle) * centeredX + Math.cos(angle) * centeredY) * crop.height;
     return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
   };
 
@@ -327,6 +430,7 @@ export function App() {
       controllerRef.current = signal;
       setBusy(true);
       setStatus('正在生成建议，可继续手动编辑或取消');
+      const referencePromise = referencePhoto ? previewFromBlob(referencePhoto.blob, 1024) : undefined;
       const original = await previewFromBlob(currentSlot.blob, 1024);
       const offscreen = document.createElement('canvas');
       const currentRenderer = new PhotoRenderer(offscreen);
@@ -334,6 +438,12 @@ export function App() {
       currentRenderer.render(state, original.width, original.height);
       const current = await previewFromBlob(await currentRenderer.toBlob(0.85), 1024);
       currentRenderer.dispose();
+      const reference = referencePromise ? await referencePromise : undefined;
+      const [originalBase64, currentBase64, referenceBase64] = await Promise.all([
+        toBase64(original.blob),
+        toBase64(current.blob),
+        reference ? toBase64(reference.blob) : Promise.resolve(undefined),
+      ]);
       const payload: PlanRequest = {
         schemaVersion: 1,
         requestId: uid(),
@@ -343,8 +453,9 @@ export function App() {
         instruction: mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim(),
         state,
         allowComposition,
-        originalPreview: { mime: 'image/jpeg', width: original.width, height: original.height, base64: await toBase64(original.blob) },
-        currentPreview: { mime: 'image/jpeg', width: current.width, height: current.height, base64: await toBase64(current.blob) },
+        originalPreview: { mime: 'image/jpeg', width: original.width, height: original.height, base64: originalBase64 },
+        currentPreview: { mime: 'image/jpeg', width: current.width, height: current.height, base64: currentBase64 },
+        ...(reference && referenceBase64 ? { referencePreview: { mime: 'image/jpeg' as const, width: reference.width, height: reference.height, base64: referenceBase64 } } : {}),
         context: [],
       };
       const response = await fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: signal.signal });
@@ -375,7 +486,7 @@ export function App() {
     }
   };
 
-  const handleExport = async () => {
+  const handleExport = async (format: ExportFormat) => {
     if (!state || !currentSlot || candidate) return;
     try {
       setExporting(true);
@@ -386,15 +497,21 @@ export function App() {
       const offscreen = document.createElement('canvas');
       const output = new PhotoRenderer(offscreen);
       await output.load(currentSlot.blob);
-      output.render(state, outW, outH);
-      const blob = await output.toBlob(0.92);
+      output.render(state, outW, outH, 1);
+      const selectedFormat = format === 'tiff'
+        ? { blob: new Blob([UTIF.encodeImage(output.rgbaPixels(), offscreen.width, offscreen.height)], { type: 'image/tiff' }), extension: 'tiff', label: 'TIFF（无压缩）' }
+        : (() => {
+          const canvasFormat = CANVAS_EXPORT_FORMATS[format];
+          return { blob: output.toBlob(canvasFormat.quality, canvasFormat.mime), extension: canvasFormat.extension, label: canvasFormat.label };
+        })();
+      const blob = await selectedFormat.blob;
       output.dispose();
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = `${currentSlot.name}-edited.jpg`;
+      link.download = `${currentSlot.name}-edited.${selectedFormat.extension}`;
       link.click();
       URL.revokeObjectURL(link.href);
-      setStatus(`已导出 ${outW} × ${outH} JPEG`);
+      setStatus(`已导出 ${outW} × ${outH} ${selectedFormat.label}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '导出资源不足。请缩小裁切范围后重新尝试。');
     } finally {
@@ -435,21 +552,24 @@ export function App() {
         zoom={zoom}
         onZoomIn={() => setZoom((value) => Math.min(200, value + 25))}
         onZoomOut={() => setZoom((value) => Math.max(25, value - 25))}
-        onZoomPreset={setZoom}
         onFit={handleFit}
         onExport={handleExport}
-        copilotOpen={copilotOpen}
-        onToggleCopilot={() => setCopilotOpen((value) => !value)}
+        leftPanelOpen={leftPanelOpen}
+        rightPanelOpen={rightPanelOpen}
+        bottomPanelOpen={bottomPanelOpen}
+        onToggleLeftPanel={() => setLeftPanelOpen((value) => !value)}
+        onToggleRightPanel={() => setRightPanelOpen((value) => !value)}
+        onToggleBottomPanel={() => setBottomPanelOpen((value) => !value)}
       />
-      <section className="content">
-        <div className="leftStack">
+      <section className={`content ${rightPanelOpen ? '' : 'right-panel-closed'}`}>
+        <div className={`leftStack ${leftPanelOpen ? '' : 'left-panel-closed'} ${bottomPanelOpen ? '' : 'bottom-panel-closed'}`}>
           <ThumbnailSidebar
             images={images}
             activeIndex={activeIndex}
             onSelect={setActiveIndex}
             onRemove={(index) => {
               removeImage(index);
-              setStatus('已从当前会话移除图片');
+              setStatus(images.length === 1 ? '当前会话没有图片' : '已从当前会话移除图片');
             }}
             onImport={handleImports}
           />
@@ -465,7 +585,7 @@ export function App() {
               onPointerCancel={finishBrushStroke}
             />
           </div>
-          {copilotOpen && <CopilotPanel
+          {bottomPanelOpen && <CopilotPanel
             status={status}
             instruction={instruction}
             setInstruction={setInstruction}
@@ -474,14 +594,17 @@ export function App() {
             onAuto={() => void requestPlan('auto')}
             onFollowup={() => void requestPlan('followup')}
             onCancel={() => controllerRef.current?.abort()}
-            onClose={() => setCopilotOpen(false)}
+            onClose={() => setBottomPanelOpen(false)}
             thumbnail={currentSlot?.thumbnail}
             candidate={candidate?.payload}
             onApply={applyCandidate}
             onDiscard={() => { setCandidate(); setStatus('已放弃建议'); }}
+            referencePhoto={referencePhoto}
+            onReferenceImport={(file) => void handleReferenceImport(file)}
+            onRemoveReference={() => { controllerRef.current?.abort(); setReferencePhoto(undefined); setCandidate(); setStatus('已移除参考图'); }}
           />}
         </div>
-        <ControlsPanel
+        {rightPanelOpen && <ControlsPanel
           state={state}
           disabled={Boolean(candidate)}
           allowComposition={allowComposition}
@@ -497,7 +620,9 @@ export function App() {
           activeBrushRegionId={activeBrushRegionId}
           onPaintBrush={setActiveBrushRegionId}
           onResetCrop={handleResetCrop}
-        />
+          onEditInteractionStart={beginInteraction}
+          onEditInteractionEnd={endInteraction}
+        />}
       </section>
       {isDraggingFiles && <div className="drop-overlay" aria-live="polite">松开即可导入照片</div>}
     </main>
