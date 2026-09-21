@@ -51,6 +51,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@colorhythm/libraw-wasm':
+        specifier: 1.1.1
+        version: 1.1.1
       '@photo-copilot/ai-contract':
         specifier: workspace:*
         version: link:../../packages/ai-contract
@@ -69,6 +72,9 @@ importers:
       react-dom:
         specifier: 19.3.0
         version: 19.3.0(react@19.3.0)
+      utif2:
+        specifier: 4.1.0
+        version: 4.1.0
       zustand:
         specifier: 5.0.15
         version: 5.0.15(@types/react@19.3.0)(react@19.3.0)
@@ -122,6 +128,9 @@ packages:
   '@babel/runtime@7.29.7':
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
+
+  '@colorhythm/libraw-wasm@1.1.1':
+    resolution: {integrity: sha512-OxqXLhDurX/sM4KL/rR71zjuH0VHBUWCOJ71tLiIxy3ATbIS2KM/8RixT0Gc3RygcsS1T8SXnzdipPqWYSjt9A==}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -1019,6 +1028,9 @@ packages:
       zod:
         optional: true
 
+  pako@1.0.11:
+    resolution: {integrity: sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==}
+
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
@@ -1182,6 +1194,9 @@ packages:
     engines: {node: '>=18.0.0'}
     hasBin: true
 
+  typed-cstruct@0.10.2:
+    resolution: {integrity: sha512-LRCAO+7CdAczqOW6TW0nxP5lEDUWFp2ORz09A22JN7pIqQyFyyItx/56VfhUV1xO5omzuC/JYqAhqL8Uth6rag==}
+
   typescript@5.9.2:
     resolution: {integrity: sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A==}
     engines: {node: '>=14.17'}
@@ -1189,6 +1204,9 @@ packages:
 
   undici-types@7.12.0:
     resolution: {integrity: sha512-goOacqME2GYyOZZfb5Lgtu+1IDmAlAEu5xnD3+xTzS10hT0vzpf0SPjkXwAw9Jm+4n/mQGDP3LO8CPbYROeBfQ==}
+
+  utif2@4.1.0:
+    resolution: {integrity: sha512-+oknB9FHrJ7oW7A2WZYajOcv4FcDR4CfoGB0dPNfxbi4GO05RRnFmt5oa23+9w32EanrYcSJWspUiJkLMs+37w==}
 
   vite-node@3.2.4:
     resolution: {integrity: sha512-EbKSKh+bh1E1IFxeO0pg1n4dvoOTt0UDiXMd/qn++r98+jPO1xtJilvXldeuQ8giIB5IkpjCgMleHMNEsGH6pg==}
@@ -1342,6 +1360,10 @@ snapshots:
       zod: 4.1.5
 
   '@babel/runtime@7.29.7': {}
+
+  '@colorhythm/libraw-wasm@1.1.1':
+    dependencies:
+      typed-cstruct: 0.10.2
 
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
@@ -2005,6 +2027,8 @@ snapshots:
     optionalDependencies:
       zod: 4.1.5
 
+  pako@1.0.11: {}
+
   pathe@2.0.3: {}
 
   pathval@2.0.1: {}
@@ -2184,9 +2208,15 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
+  typed-cstruct@0.10.2: {}
+
   typescript@5.9.2: {}
 
   undici-types@7.12.0: {}
+
+  utif2@4.1.0:
+    dependencies:
+      pako: 1.0.11
 
   vite-node@3.2.4(@types/node@24.5.2)(lightningcss@1.33.0)(tsx@4.20.5):
     dependencies:
