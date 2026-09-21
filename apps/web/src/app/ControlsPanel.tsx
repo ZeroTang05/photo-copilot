@@ -112,7 +112,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={crop.x}
           min={0}
           max={Math.max(0, 1 - crop.width)}
-          step={0.0001}
+          step={0.01}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('x', value)}
           resetValue={null}
@@ -122,7 +122,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={crop.y}
           min={0}
           max={Math.max(0, 1 - crop.height)}
-          step={0.0001}
+          step={0.01}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('y', value)}
           resetValue={null}
@@ -132,7 +132,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={crop.width}
           min={0.01}
           max={Math.max(0.01, 1 - crop.x)}
-          step={0.0001}
+          step={0.01}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('width', value)}
           resetValue={null}
@@ -142,7 +142,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           value={crop.height}
           min={0.01}
           max={Math.max(0.01, 1 - crop.y)}
-          step={0.0001}
+          step={0.01}
           disabled={!state || disabled}
           onChange={(value) => props.onCropChange('height', value)}
           resetValue={null}
