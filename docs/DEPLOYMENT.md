@@ -20,6 +20,12 @@ ALLOWED_ORIGIN=https://photo-copilot.vercel.app
 
 预览部署与生产部署应使用各自的来源配置。Vercel 项目根目录应选择仓库根目录。
 
+| 服务商 | `AI_PROVIDER` | 必填配置 | 可选配置 |
+| --- | --- | --- | --- |
+| OpenAI | `openai` | `OPENAI_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `ALLOWED_ORIGIN` |
+| OpenAI 兼容服务 | `openai` | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`AI_MODEL`、`SESSION_SECRET` | `ALLOWED_ORIGIN` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `ANTHROPIC_BASE_URL`、`ALLOWED_ORIGIN` |
+
 ## Cloudflare
 
 Cloudflare Workers 配置托管 Vite 静态资源，并直接处理 `/api/*`。原生 Worker 后端使用 OpenAI Responses API 和 Durable Object 保存会话与每日额度。
@@ -32,6 +38,11 @@ pnpm dlx wrangler deploy
 ```
 
 Cloudflare 项目中配置 `AI_MODEL`。需要限制来源时，配置 `ALLOWED_ORIGIN`。Cloudflare 版本当前使用 OpenAI 和 OpenAI 兼容接口。
+
+| 服务商 | 必填配置 | 可选配置 |
+| --- | --- | --- |
+| OpenAI | `OPENAI_API_KEY`、`SESSION_SECRET` | `AI_MODEL`、`ALLOWED_ORIGIN` |
+| OpenAI 兼容服务 | `OPENAI_API_KEY`、`SESSION_SECRET`、`OPENAI_BASE_URL`、`AI_MODEL` | `ALLOWED_ORIGIN` |
 
 ## 运行约束
 

@@ -22,6 +22,12 @@
       },
       "SESSION_SECRET": {
         "description": "用于保护会话 Cookie 的随机长字符串"
+      },
+      "AI_MODEL": {
+        "description": "照片编辑模型名称，默认值为 gpt-4o-mini"
+      },
+      "OPENAI_BASE_URL": {
+        "description": "OpenAI 兼容服务的接口地址，OpenAI 官方服务可留空"
       }
     }
   }

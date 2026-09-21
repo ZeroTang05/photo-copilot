@@ -47,11 +47,23 @@ pnpm dev:gateway
 
 部署完成后，平台会自动连接 Fork 后的仓库。后续推送到默认分支时，平台会自动发布新版本。
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=OPENAI_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+### Vercel
+
+选择一个 AI 服务商后点击部署。部署页面会显示需要填写的全部环境变量。
+
+[![Deploy OpenAI with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2COPENAI_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22openai%22%2C%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+
+[![Deploy OpenAI compatible service with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2COPENAI_API_KEY%2COPENAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22openai%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+
+[![Deploy Anthropic with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2CANTHROPIC_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22anthropic%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+
+### Cloudflare
+
+Cloudflare 原生 Worker 支持 OpenAI 和 OpenAI 兼容接口。部署页面会要求填写 OpenAI Key 和会话密钥。模型名称默认为 `gpt-4o-mini`，兼容服务可继续填写接口地址和模型名称。
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot)
 
-Vercel 部署页面会要求填写 OpenAI Key、模型名称和会话密钥。Cloudflare 部署页面会要求填写 OpenAI Key 和会话密钥。完整步骤见 [部署说明](docs/DEPLOYMENT.md)。
+完整步骤见 [部署说明](docs/DEPLOYMENT.md)。
 
 ## 参与贡献
 
