@@ -47,6 +47,23 @@ const parseResult = (result: ProviderCallResult): PlanPayload => {
   return PlanPayloadSchema.parse(normalizePayload(raw));
 };
 
+/** 未授予构图权限时保留可用的调色建议，并移除 AI 偶发返回的构图字段。 */
+const removeUnauthorizedComposition = (payload: PlanPayload, allowComposition: boolean): PlanPayload => {
+  if (allowComposition || payload.status !== 'plan' || !payload.changes?.transform) return payload;
+  const changes = { ...payload.changes, transform: null };
+  const reasons = payload.reasons.filter((reason) => reason.target !== 'transform');
+  const hasEditableChange = changes.globalAssignments.length > 0 || changes.regionUpserts.length > 0 || changes.regionDeletes.length > 0;
+  if (hasEditableChange) return { ...payload, changes, reasons };
+  return {
+    ...payload,
+    status: 'clarify',
+    message: '当前没有授权 AI 调整构图，因此未生成可应用的调色修改。',
+    changes: null,
+    reasons: [],
+    limitations: [...payload.limitations, '构图调整已忽略。'].slice(0, 3),
+  };
+};
+
 const buildRepairText = (userText: string, error: unknown): string =>
   `${userText}\n\n[修复请求] 你之前的提交未通过校验,错误信息:\n${errorMessage(error)}\n请重新调用 submit_edit_plan 工具,严格匹配 input_schema。`;
 
@@ -62,7 +79,7 @@ export async function planWithRepair(
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const payload = parseResult(result);
+      const payload = removeUnauthorizedComposition(parseResult(result), options.allowComposition);
       validatePlan(options.state, payload, options.allowComposition);
       return { payload, result };
     } catch (err) {
