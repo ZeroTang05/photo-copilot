@@ -17,17 +17,20 @@
   },
   "cloudflare": {
     "bindings": {
-      "OPENAI_API_KEY": {
-        "description": "用于生成照片编辑建议的 OpenAI 或兼容服务密钥"
+      "AI_SDK": {
+        "description": "选择 openai 或 anthropic"
+      },
+      "AI_API_KEY": {
+        "description": "所选 AI 服务的访问密钥"
       },
       "SESSION_SECRET": {
         "description": "用于保护会话 Cookie 的随机长字符串"
       },
-      "AI_MODEL": {
-        "description": "照片编辑模型名称，默认值为 gpt-4o-mini"
+      "AI_BASE_URL": {
+        "description": "AI 服务接口地址，留空时使用所选 SDK 的官方地址"
       },
-      "OPENAI_BASE_URL": {
-        "description": "OpenAI 兼容服务的接口地址，OpenAI 官方服务可留空"
+      "AI_MODEL": {
+        "description": "照片编辑模型名称"
       }
     }
   }

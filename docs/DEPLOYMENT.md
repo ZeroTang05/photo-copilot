@@ -7,7 +7,9 @@ Vercel 部署包含 Vite 前端与 Node.js 网关函数。根目录的 `vercel.j
 在 Vercel 项目中配置以下环境变量。
 
 ```text
-OPENAI_API_KEY=
+AI_SDK=openai
+AI_API_KEY=
+AI_BASE_URL=
 AI_MODEL=gpt-4o-mini
 SESSION_SECRET=
 ```
@@ -20,11 +22,11 @@ ALLOWED_ORIGIN=https://photo-copilot.vercel.app
 
 预览部署与生产部署应使用各自的来源配置。Vercel 项目根目录应选择仓库根目录。
 
-| 服务商 | `AI_PROVIDER` | 必填配置 | 可选配置 |
+| 服务商 | `AI_SDK` | 必填配置 | 可选配置 |
 | --- | --- | --- | --- |
-| OpenAI | `openai` | `OPENAI_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `ALLOWED_ORIGIN` |
-| OpenAI 兼容服务 | `openai` | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`AI_MODEL`、`SESSION_SECRET` | `ALLOWED_ORIGIN` |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `ANTHROPIC_BASE_URL`、`ALLOWED_ORIGIN` |
+| OpenAI | `openai` | `AI_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `AI_BASE_URL`、`ALLOWED_ORIGIN` |
+| OpenAI 兼容服务 | `openai` | `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL`、`SESSION_SECRET` | `ALLOWED_ORIGIN` |
+| Anthropic | `anthropic` | `AI_API_KEY`、`AI_MODEL`、`SESSION_SECRET` | `AI_BASE_URL`、`ALLOWED_ORIGIN` |
 
 ## Cloudflare
 
@@ -32,17 +34,17 @@ Cloudflare Workers 配置托管 Vite 静态资源，并直接处理 `/api/*`。�
 
 ```text
 pnpm build:deploy
-pnpm dlx wrangler secret put OPENAI_API_KEY
+pnpm dlx wrangler secret put AI_API_KEY
 pnpm dlx wrangler secret put SESSION_SECRET
 pnpm dlx wrangler deploy
 ```
 
-Cloudflare 项目中配置 `AI_MODEL`。需要限制来源时，配置 `ALLOWED_ORIGIN`。Cloudflare 版本当前使用 OpenAI 和 OpenAI 兼容接口。
+Cloudflare 项目中配置 `AI_SDK` 和 `AI_MODEL`。需要限制来源时，配置 `ALLOWED_ORIGIN`。`AI_BASE_URL` 留空时使用 OpenAI 或 Anthropic 的官方地址。
 
 | 服务商 | 必填配置 | 可选配置 |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY`、`SESSION_SECRET` | `AI_MODEL`、`ALLOWED_ORIGIN` |
-| OpenAI 兼容服务 | `OPENAI_API_KEY`、`SESSION_SECRET`、`OPENAI_BASE_URL`、`AI_MODEL` | `ALLOWED_ORIGIN` |
+| OpenAI | `AI_SDK=openai`、`AI_API_KEY`、`SESSION_SECRET` | `AI_BASE_URL`、`AI_MODEL`、`ALLOWED_ORIGIN` |
+| Anthropic | `AI_SDK=anthropic`、`AI_API_KEY`、`SESSION_SECRET` | `AI_BASE_URL`、`AI_MODEL`、`ALLOWED_ORIGIN` |
 
 ## 运行约束
 

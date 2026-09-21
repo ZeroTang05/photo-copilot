@@ -3,8 +3,9 @@ import { z } from '../node_modules/zod/index.js';
 import { EditStateSchema, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION, validatePlan } from '../../../packages/domain/src/index';
 
 interface Env {
-  OPENAI_API_KEY?: string;
-  OPENAI_BASE_URL?: string;
+  AI_SDK?: 'openai' | 'anthropic';
+  AI_API_KEY?: string;
+  AI_BASE_URL?: string;
   AI_MODEL?: string;
   SESSION_SECRET: string;
   ALLOWED_ORIGIN?: string;
@@ -71,12 +72,17 @@ async function quota(env: Env, input: object) {
 }
 
 async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse>) {
-  const base = (env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const compact = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' } });
-  const provider = await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions: '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。', input: [{ role: 'user', content: [{ type: 'input_text', text: compact }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }] }], text: { format: { type: 'json_object' } } }) });
+  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。';
+  const anthropic = env.AI_SDK === 'anthropic';
+  const base = (env.AI_BASE_URL || (anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com/v1')).replace(/\/$/, '');
+  const provider = anthropic
+    ? await fetch(`${base.endsWith('/v1') ? base : `${base}/v1`}/messages`, { method: 'POST', headers: { 'x-api-key': env.AI_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'claude-3-5-sonnet-latest', max_tokens: 6000, system: `${instructions} 只输出 JSON，不要使用 Markdown。`, messages: [{ role: 'user', content: [{ type: 'text', text: compact }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.originalPreview.base64 } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.currentPreview.base64 } }] }] }) })
+    : await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.AI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions, input: [{ role: 'user', content: [{ type: 'input_text', text: compact }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }] }], text: { format: { type: 'json_object' } } }) });
   const body = await provider.json() as Record<string, any>;
-  if (!provider.ok || body.status !== 'completed' || !body.output_text) throw new Error(`OpenAI 请求失败 ${provider.status}`);
-  const payload = PlanPayloadSchema.parse(JSON.parse(String(body.output_text).replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '')));
+  const raw = anthropic ? body.content?.find((item: Record<string, unknown>) => item.type === 'text')?.text : body.output_text;
+  if (!provider.ok || !raw || (!anthropic && body.status !== 'completed')) throw new Error(`AI 请求失败 ${provider.status}`);
+  const payload = PlanPayloadSchema.parse(JSON.parse(String(raw).replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '')));
   validatePlan(request.state, payload, request.allowComposition);
   return { payload, model: String(body.model), usage: body.usage ?? {} };
 }
@@ -93,7 +99,7 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
   }
   if (request.method === 'POST' && url.pathname === '/api/plan') {
     if (!allowed(request, env)) return response(error('ORIGIN_DENIED', '当前来源无法使用服务'), 403);
-    if (!env.OPENAI_API_KEY) return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用，本地编辑仍可继续'), 503);
+    if (!env.AI_API_KEY) return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用，本地编辑仍可继续'), 503);
     let parsed; try { parsed = PlanRequestSchema.parse(await request.json()); } catch { return response(error('REQUEST_INVALID', '请求内容不符合编辑协议'), 400); }
     const reserved = await quota(env, { action: 'reserve', sessionId: session.id, requestId: parsed.requestId, ...limits });
     if (!reserved.ok) return reserved;

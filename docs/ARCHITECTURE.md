@@ -29,8 +29,8 @@ AI 的输出进入校验器与候选区。应用建议后，确定性的状态 r
 | 解码编码 | createImageBitmap、Canvas 2D、Blob | 使用浏览器真实解码与 JPEG 编码能力 |
 | 请求与校验 | fetch、AbortController、Zod | 同一套领域 Schema 供浏览器与网关校验 |
 | 服务端 | Node.js 24 LTS、Fastify | 同源静态文件与少量 API，便于本地及单实例托管 |
-| 模型 SDK | OpenAI 官方 JavaScript SDK（Responses API）、`@anthropic-ai/sdk`（Messages API） | 通过 `AI_PROVIDER` 选择；OpenAI 路径用 `text.format.type: 'json_object'`，Anthropic 路径强制调用 `submit_edit_plan` 工具并以 `input_schema` 约束输入 |
-| 初始模型 | 取决于 `AI_PROVIDER`：OpenAI 路径默认 `gpt-4o-mini`，Anthropic 路径由 `AI_MODEL` 显式指定 | 模型 ID 必须与所选 provider 能力匹配，切换后重新校准 max_output_tokens 与黄金场景 |
+| 模型 SDK | OpenAI 官方 JavaScript SDK（Responses API）、`@anthropic-ai/sdk`（Messages API） | 通过 `AI_SDK` 选择；OpenAI 路径用 `text.format.type: 'json_object'`，Anthropic 路径强制调用 `submit_edit_plan` 工具并以 `input_schema` 约束输入 |
+| 初始模型 | OpenAI 路径默认 `gpt-4o-mini`，Anthropic 路径由 `AI_MODEL` 显式指定 | 模型 ID 必须与所选 SDK 能力匹配 |
 | 依赖管理 | pnpm workspace | 两个应用和三个内聚包共享类型 |
 | 验证 | Vitest、Playwright、真实桌面浏览器 | 领域不变量、网络契约和实际渲染分别验证 |
 | 持久化 | 首版无编辑持久化,网关采用进程内匿名会话与计数器 | 单实例开放试用,后续扩容再引入持久共享存储 |
@@ -123,7 +123,7 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 本地开发使用 Vite，代理同源 API 到 Fastify。生产环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
 
-服务端必需配置 `AI_PROVIDER`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`(按 provider 取对应密钥)、`OPENAI_BASE_URL` 或 `ANTHROPIC_BASE_URL`(可选,覆盖默认上游)、`AI_MODEL`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`SESSION_SECRET` 用于签名会话 cookie;若不配置,启动时自动生成进程级随机值,每次重启会让旧 cookie 失效,但 AI 仍然可用。`AI_PROVIDER` 默认 `openai`;OpenAI 路径默认模型 `gpt-4o-mini`,Anthropic 路径必须显式指定 `AI_MODEL`。每个匿名会话每天最多 30 次上游尝试,全局每天最多 300 次。缺少凭据时启动诊断显示 AI 不可用,手动编辑页面可以运行。
+服务端必需配置 `AI_SDK`、`AI_API_KEY`、`AI_MODEL`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`AI_BASE_URL` 留空时使用所选 SDK 的官方地址。`SESSION_SECRET` 用于签名会话 cookie。`AI_SDK` 默认 `openai`。每个匿名会话每天最多 30 次上游尝试,全局每天最多 300 次。
 
 会话标识只存在服务端与 HttpOnly Cookie 通道。首版无邀请码门槛:任何同源请求都自动签发 24 小时匿名会话,会话内按上述速率限制计数。进程内计数重启会清零,首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储,该项是架构扩展门槛。
 

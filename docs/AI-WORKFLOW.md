@@ -8,16 +8,16 @@ AI 负责理解照片和编辑意图，返回受限动作空间中的候选计�
 
 ## 多 Provider 适配
 
-网关支持两种 SDK 路径，通过 `AI_PROVIDER` 切换：
+网关支持两种 SDK 路径，通过 `AI_SDK` 切换：
 
-| `AI_PROVIDER` | SDK | 结构化输出机制 | 适用 |
+| `AI_SDK` | SDK | 结构化输出机制 | 适用 |
 | --- | --- | --- | --- |
 | `openai`(默认) | `openai` Responses API | `text.format.type: 'json_object'` + Zod 校验 + 一次修复重试 | OpenAI 官方及多数 OpenAI 兼容服务 |
 | `anthropic` | `@anthropic-ai/sdk` Messages API | 强制调用 `submit_edit_plan` 工具,`input_schema = planPayloadJsonSchema` | Anthropic 官方、MiniMax 等 Anthropic 兼容服务 |
 
 ### 为什么 OpenAI 路径不用 strict `json_schema`
 
-`response_format.type: 'json_schema', strict: true` 仅 OpenAI 官方模型完整支持，多数兼容服务（DeepSeek、Qwen、MiniMax 等）会静默忽略该参数，模型按自由文本生成。`AI_PROVIDER=openai` 路径因此改用宽容的 `json_object` + 服务端 Zod 校验 + 一次修复重试，确保结构合法；strict 模式对 OpenAI 官方模型仍是有益约束，可在未来作为 OpenAI 路径的可选补充。
+`response_format.type: 'json_schema', strict: true` 仅 OpenAI 官方模型完整支持，多数兼容服务会静默忽略该参数。`AI_SDK=openai` 路径使用宽容的 `json_object`、服务端 Zod 校验和一次修复重试，确保结构合法。
 
 ### Anthropic 工具调用约定
 
@@ -32,12 +32,12 @@ AI 负责理解照片和编辑意图，返回受限动作空间中的候选计�
 
 | 变量 | 用途 | 默认 |
 | --- | --- | --- |
-| `AI_PROVIDER` | `openai` 或 `anthropic` | `openai` |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 路径密钥与端点 | OpenAI 官方 |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | Anthropic 路径密钥与端点 | Anthropic 官方 |
+| `AI_SDK` | `openai` 或 `anthropic` | `openai` |
+| `AI_API_KEY` | 所选 SDK 的密钥 | 无 |
+| `AI_BASE_URL` | 所选 SDK 的端点 | 留空时使用官方地址 |
 | `AI_MODEL` | 任一路径下实际调用的模型 ID | `gpt-4o-mini`（OpenAI 默认） |
 
-切换示例：Azure OpenAI 设 `OPENAI_BASE_URL=https://{resource}.openai.azure.com/openai/deployments/{deployment}`；DeepSeek 设 `OPENAI_BASE_URL=https://api.deepseek.com/v1`；MiniMax 走 Anthropic 路径，设 `AI_PROVIDER=anthropic`、`ANTHROPIC_BASE_URL=https://api.minimax.cn/v1`、`AI_MODEL=MiniMax-M3`。模型 ID 必须与所选厂商的能力匹配，并支持结构化输出与图像输入；切换后需重新校准 max_output_tokens 预算与黄金场景。
+切换示例：Azure OpenAI 设 `AI_SDK=openai` 与 `AI_BASE_URL=https://{resource}.openai.azure.com/openai/deployments/{deployment}`；DeepSeek 设 `AI_SDK=openai` 与 `AI_BASE_URL=https://api.deepseek.com/v1`；MiniMax 设 `AI_SDK=anthropic`、`AI_BASE_URL=https://api.minimax.cn/v1`、`AI_MODEL=MiniMax-M3`。模型 ID 必须与所选 SDK 的能力匹配，并支持结构化输出与图像输入。
 
 所选模型的图像与结构化输出能力见 [模型官方文档](https://developers.openai.com/api/docs/models/gpt-5.6-terra)。输入格式见 [图像理解指南](https://developers.openai.com/api/docs/guides/images-vision)，输出约束见 [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)。官方资料同时提示精确空间定位存在局限，因此区域选择必须允许修正。
 

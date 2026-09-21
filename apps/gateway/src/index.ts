@@ -7,11 +7,9 @@ import { createProvider, resolveProviderKind } from './providers/index.js';
 import { planWithRepair } from './planner.js';
 
 const config = {
-  provider: resolveProviderKind(process.env.AI_PROVIDER),
-  openaiApiKey: process.env.OPENAI_API_KEY ?? '',
-  openaiBaseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
-  anthropicBaseURL: process.env.ANTHROPIC_BASE_URL?.trim() || undefined,
+  provider: resolveProviderKind(process.env.AI_SDK),
+  apiKey: process.env.AI_API_KEY ?? '',
+  baseURL: process.env.AI_BASE_URL?.trim() || undefined,
   model: process.env.AI_MODEL ?? '',
   // SESSION_SECRET 用于签名会话 cookie。如果未配置,启动时自动生成一个随机
   // 进程级秘钥——重启后旧 cookie 失效,但 AI 仍然可用(每次刷新会建新会话)。
@@ -22,9 +20,7 @@ const config = {
   perSessionLimit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT_PER_SESSION ?? 30),
 };
 
-const activeApiKey = config.provider === 'anthropic' ? config.anthropicApiKey : config.openaiApiKey;
-const activeBaseURL = config.provider === 'anthropic' ? config.anthropicBaseURL : config.openaiBaseURL;
-const provider = createProvider(config.provider, { apiKey: activeApiKey, baseURL: activeBaseURL, model: config.model });
+const provider = createProvider(config.provider, { apiKey: config.apiKey, baseURL: config.baseURL, model: config.model });
 
 export const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 3 * 1024 * 1024 });
 await app.register(cookie);
@@ -122,7 +118,7 @@ app.delete('/api/session', async (request, reply) => {
 app.post('/api/plan', async (request, reply) => {
   if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
   const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
-  if(!activeApiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
+  if(!config.apiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
   let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
   const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
   resetCounters(); if(session.attempts>=config.perSessionLimit || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;

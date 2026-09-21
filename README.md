@@ -51,15 +51,13 @@ pnpm dev:gateway
 
 选择一个 AI 服务商后点击部署。部署页面会显示需要填写的全部环境变量。
 
-[![Deploy OpenAI with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2COPENAI_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22openai%22%2C%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+[![Deploy OpenAI SDK with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_SDK%2CAI_API_KEY%2CAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_SDK%22%3A%22openai%22%2C%22AI_BASE_URL%22%3A%22https%3A%2F%2Fapi.openai.com%2Fv1%22%2C%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
 
-[![Deploy OpenAI compatible service with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2COPENAI_API_KEY%2COPENAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22openai%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
-
-[![Deploy Anthropic with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_PROVIDER%2CANTHROPIC_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_PROVIDER%22%3A%22anthropic%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+[![Deploy Anthropic SDK with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_SDK%2CAI_API_KEY%2CAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_SDK%22%3A%22anthropic%22%2C%22AI_BASE_URL%22%3A%22https%3A%2F%2Fapi.anthropic.com%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
 
 ### Cloudflare
 
-Cloudflare 原生 Worker 支持 OpenAI 和 OpenAI 兼容接口。部署页面会要求填写 OpenAI Key 和会话密钥。模型名称默认为 `gpt-4o-mini`，兼容服务可继续填写接口地址和模型名称。
+Cloudflare 原生 Worker 支持 OpenAI SDK 和 Anthropic SDK。部署页面会要求填写 SDK、Key、接口地址、模型名称和会话密钥。接口地址留空时使用所选 SDK 的官方地址。
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot)
 
