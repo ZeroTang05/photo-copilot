@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload } from '@photo-copilot/domain';
+import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
@@ -82,6 +82,8 @@ export function App() {
   const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [compare, setCompare] = useState(false);
+  const [zoom, setZoom] = useState(100);
+  const [copilotOpen, setCopilotOpen] = useState(true);
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
 
@@ -135,7 +137,7 @@ export function App() {
     void r.load(currentSlot.blob).then(() => draw());
   }, [currentSlot?.blob]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleFit = useCallback(() => { draw(); }, [draw]);
+  const handleFit = useCallback(() => { setZoom(100); draw(); }, [draw]);
 
   const handleCompareStart = useCallback(() => {
     if (!state) return;
@@ -188,7 +190,25 @@ export function App() {
 
   const handleAspectLockChange = (value: EditState['transform']['aspectLock']) => {
     if (!state || candidate) return;
-    commit({ ...state, transform: { ...state.transform, aspectLock: value } });
+    const ratios: Record<EditState['transform']['aspectLock'], number | undefined> = {
+      free: undefined,
+      original: state.sourceWidth / state.sourceHeight,
+      square: 1,
+      portrait4x5: 4 / 5,
+      landscape3x2: 3 / 2,
+      wide16x9: 16 / 9,
+    };
+    const ratio = ratios[value];
+    const crop = { ...state.transform.crop };
+    if (ratio) {
+      const imageRatio = state.sourceWidth / state.sourceHeight;
+      const currentRatio = (crop.width * imageRatio) / crop.height;
+      if (currentRatio > ratio) crop.width = Math.min(crop.height * ratio / imageRatio, 1);
+      else crop.height = Math.min(crop.width * imageRatio / ratio, 1);
+      crop.x = Math.min(Math.max(0, crop.x), 1 - crop.width);
+      crop.y = Math.min(Math.max(0, crop.y), 1 - crop.height);
+    }
+    commit({ ...state, transform: { ...state.transform, aspectLock: value, crop } });
   };
 
   const handleCropChange = (key: 'x' | 'y' | 'width' | 'height', value: number) => {
@@ -199,7 +219,7 @@ export function App() {
     commit({ ...state, transform: { ...state.transform, crop } });
   };
 
-  const handleAddRegion = () => {
+  const handleAddRegion = (mode: Region['mode'] = 'inside') => {
     if (!state || candidate) return;
     if (state.regions.length === 4) { setStatus('局部区域最多四个'); return; }
     const region = {
@@ -211,9 +231,20 @@ export function App() {
       radiusX: 0.2,
       radiusY: 0.2,
       feather: 0.35,
+      mode,
       adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
     };
     commit({ ...state, regions: [...state.regions, region] });
+  };
+
+  const handleUpdateRegion = (nextRegion: Region) => {
+    if (!state || candidate) return;
+    commit({ ...state, regions: state.regions.map((region) => region.id === nextRegion.id ? nextRegion : region) });
+  };
+
+  const handleDeleteRegion = (regionId: string) => {
+    if (!state || candidate) return;
+    commit({ ...state, regions: state.regions.filter((region) => region.id !== regionId) });
   };
 
   const requestPlan = async (mode: 'auto' | 'followup') => {
@@ -312,10 +343,14 @@ export function App() {
         onRedo={redo}
         onCompareStart={handleCompareStart}
         onCompareEnd={handleCompareEnd}
-        onZoomIn={() => { /* handled by canvas transform in styles */ }}
-        onZoomOut={() => { /* handled by canvas transform in styles */ }}
+        zoom={zoom}
+        onZoomIn={() => setZoom((value) => Math.min(200, value + 25))}
+        onZoomOut={() => setZoom((value) => Math.max(25, value - 25))}
+        onZoomPreset={setZoom}
         onFit={handleFit}
         onExport={handleExport}
+        copilotOpen={copilotOpen}
+        onToggleCopilot={() => setCopilotOpen((value) => !value)}
       />
       <section className="content">
         <div className="leftStack">
@@ -328,11 +363,11 @@ export function App() {
               setStatus('已从当前会话移除图片');
             }}
           />
-          <div className="canvasWrap">
-            <canvas ref={canvasRef} aria-label="照片编辑画布" />
+          <div className="canvasWrap" onWheel={(event) => { if (!state) return; event.preventDefault(); setZoom((value) => Math.min(200, Math.max(25, value + (event.deltaY < 0 ? 10 : -10)))); }}>
+            <canvas ref={canvasRef} style={{ transform: `scale(${zoom / 100})` }} aria-label="照片编辑画布" />
             <p className="status">{compare ? '按住对比中' : status}</p>
           </div>
-          <CopilotPanel
+          {copilotOpen && <CopilotPanel
             status={status}
             instruction={instruction}
             setInstruction={setInstruction}
@@ -341,12 +376,12 @@ export function App() {
             onAuto={() => void requestPlan('auto')}
             onFollowup={() => void requestPlan('followup')}
             onCancel={() => controllerRef.current?.abort()}
-            onClose={() => setStatus('AI 面板已收起。可随时从工具栏再次触发。')}
+            onClose={() => setCopilotOpen(false)}
             thumbnail={currentSlot?.thumbnail}
             candidate={candidate?.payload}
             onApply={applyCandidate}
             onDiscard={() => { setCandidate(); setStatus('已放弃建议'); }}
-          />
+          />}
         </div>
         <ControlsPanel
           state={state}
@@ -359,6 +394,8 @@ export function App() {
           onAspectLockChange={handleAspectLockChange}
           onAddRegion={handleAddRegion}
           regionCount={state?.regions.length ?? 0}
+          onUpdateRegion={handleUpdateRegion}
+          onDeleteRegion={handleDeleteRegion}
         />
       </section>
     </main>

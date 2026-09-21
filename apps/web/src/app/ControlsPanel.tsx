@@ -1,4 +1,4 @@
-import type { EditState, GlobalKey } from '@photo-copilot/domain';
+import type { EditState, GlobalKey, Region } from '@photo-copilot/domain';
 import { Slider, formatSigned } from './Slider';
 
 interface ControlsPanelProps {
@@ -10,8 +10,10 @@ interface ControlsPanelProps {
   onTransformChange: (patch: Partial<EditState['transform']>) => void;
   onCropChange: (key: 'x' | 'y' | 'width' | 'height', value: number) => void;
   onAspectLockChange: (value: EditState['transform']['aspectLock']) => void;
-  onAddRegion: () => void;
+  onAddRegion: (mode?: Region['mode']) => void;
   regionCount: number;
+  onUpdateRegion: (region: Region) => void;
+  onDeleteRegion: (regionId: string) => void;
 }
 
 const aspectOptions: Array<{ value: EditState['transform']['aspectLock']; label: string }> = [
@@ -36,6 +38,27 @@ const DisabledPlaceholder = ({ label }: { label: string }) => (
   </div>
 );
 
+function RegionEditor({ region, disabled, onUpdate, onDelete }: { region: Region; disabled: boolean; onUpdate: (next: Region) => void; onDelete: () => void }) {
+  const change = <K extends keyof Region>(key: K, value: Region[K]) => onUpdate({ ...region, [key]: value });
+  const adjustment = (key: keyof Region['adjustments'], value: number) => onUpdate({ ...region, adjustments: { ...region.adjustments, [key]: value } });
+  return <div className="region-editor">
+    <div className="region-editor-head">
+      <input aria-label="区域名称" value={region.label} disabled={disabled} maxLength={40} onChange={(event) => change('label', event.target.value)} />
+      <button className="region-delete" disabled={disabled} onClick={onDelete}>删除</button>
+    </div>
+    <label className="check"><input type="checkbox" checked={region.enabled} disabled={disabled} onChange={(event) => change('enabled', event.target.checked)} />启用蒙版</label>
+    <label className="select-row"><span>影响范围</span><select value={region.mode} disabled={disabled} onChange={(event) => change('mode', event.target.value as Region['mode'])}><option value="inside">椭圆内</option><option value="outside">椭圆外</option></select></label>
+    <Slider label="中心 X" value={region.centerX} min={0} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('centerX', value)} />
+    <Slider label="中心 Y" value={region.centerY} min={0} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('centerY', value)} />
+    <Slider label="横向范围" value={region.radiusX} min={0.01} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('radiusX', value)} />
+    <Slider label="纵向范围" value={region.radiusY} min={0.01} max={1} step={0.0001} disabled={disabled} onChange={(value) => change('radiusY', value)} />
+    <Slider label="羽化" value={region.feather} min={0.05} max={1} step={0.01} disabled={disabled} onChange={(value) => change('feather', value)} />
+    <Slider label="局部曝光" value={region.adjustments.exposureEV} min={-2} max={2} step={0.01} disabled={disabled} onChange={(value) => adjustment('exposureEV', value)} formatValue={(value) => formatSigned(value, 2)} />
+    <Slider label="局部高光" value={region.adjustments.highlights} min={-100} max={100} step={1} disabled={disabled} onChange={(value) => adjustment('highlights', value)} formatValue={(value) => formatSigned(value)} />
+    <Slider label="局部饱和" value={region.adjustments.saturation} min={-100} max={100} step={1} disabled={disabled} onChange={(value) => adjustment('saturation', value)} formatValue={(value) => formatSigned(value)} />
+  </div>;
+}
+
 export function ControlsPanel(props: ControlsPanelProps) {
   const { state, disabled, regionCount } = props;
   const crop = state?.transform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
@@ -54,8 +77,6 @@ export function ControlsPanel(props: ControlsPanelProps) {
             {aspectOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
         </label>
-        <Slider label="水平校正" value={0} min={-10} max={10} step={0.1} disabled onChange={() => {}} formatValue={() => '0.0°'} />
-        <Slider label="垂直校正" value={0} min={-10} max={10} step={0.1} disabled onChange={() => {}} formatValue={() => '0.0°'} />
         <Slider
           label="旋转"
           value={state?.transform.angleDeg ?? 0}
@@ -250,9 +271,11 @@ export function ControlsPanel(props: ControlsPanelProps) {
             +
           </button>
         </summary>
-        <DisabledPlaceholder label="画笔" />
-        <DisabledPlaceholder label="渐变" />
-        <DisabledPlaceholder label="径向" />
+        {state?.regions.map((region) => <RegionEditor key={region.id} region={region} disabled={disabled} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} />)}
+        {regionCount === 0 && <p className="region-hint">添加椭圆蒙版后可独立调整局部光线与颜色。</p>}
+        <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('outside')}>添加椭圆外径向蒙版</button>
+        <DisabledPlaceholder label="画笔蒙版" />
+        <DisabledPlaceholder label="线性渐变" />
       </details>
     </aside>
   );

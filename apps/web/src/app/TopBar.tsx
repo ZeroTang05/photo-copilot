@@ -1,10 +1,11 @@
-import type { ChangeEvent } from 'react';
+import { useState, type ChangeEvent } from 'react';
 
 interface TopBarProps {
   hasState: boolean;
   canUndo: boolean;
   canRedo: boolean;
   exporting: boolean;
+  zoom: number;
   onImport: (file: File) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -12,8 +13,11 @@ interface TopBarProps {
   onCompareEnd: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
+  onZoomPreset: (value: number) => void;
   onFit: () => void;
   onExport: () => void;
+  copilotOpen: boolean;
+  onToggleCopilot: () => void;
 }
 
 const IconImport = () => (
@@ -67,6 +71,7 @@ const IconExport = () => (
 );
 
 export function TopBar(props: TopBarProps) {
+  const [showZoomMenu, setShowZoomMenu] = useState(false);
   const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) props.onImport(file);
@@ -92,12 +97,16 @@ export function TopBar(props: TopBarProps) {
         <IconCompare />
         <span>对比</span>
       </button>
+      <button className={`tool ${props.copilotOpen ? 'active-tool' : ''}`} onClick={props.onToggleCopilot} title="显示或隐藏 AI 副驾">
+        <span>AI 副驾</span>
+      </button>
       <div className="toolbar-spacer" />
       <div className="zoom">
         <button className="zoom-btn" onClick={props.onZoomOut} title="缩小">−</button>
-        <button className="zoom-fit" onClick={props.onFit} title="适应窗口">100%</button>
+        <button className="zoom-fit" onClick={props.onFit} title="适应窗口">{props.zoom}%</button>
         <button className="zoom-btn" onClick={props.onZoomIn} title="放大">+</button>
-        <button className="zoom-menu" title="缩放选项" aria-label="缩放选项">▾</button>
+        <button className="zoom-menu" onClick={() => setShowZoomMenu((value) => !value)} title="缩放选项" aria-label="缩放选项">▾</button>
+        {showZoomMenu && <div className="zoom-popover">{[25, 50, 100, 150, 200].map((value) => <button key={value} onClick={() => { props.onZoomPreset(value); setShowZoomMenu(false); }}>{value}%</button>)}</div>}
       </div>
       <button className="export" disabled={!props.hasState || props.exporting} onClick={props.onExport}>
         <IconExport />

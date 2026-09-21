@@ -36,7 +36,7 @@ export const TransformSchema = z.object({
 }).strict();
 export const RegionSchema = z.object({
   id: z.uuid(), label: z.string().trim().min(1).max(40), enabled: z.boolean(), centerX: finite(0, 1), centerY: finite(0, 1),
-  radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1), adjustments: LocalAdjustmentsSchema,
+  radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1), mode: z.enum(['inside', 'outside']).default('inside'), adjustments: LocalAdjustmentsSchema,
 }).strict();
 export const EditStateSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), rendererVersion: z.literal(RENDERER_VERSION), imageId: z.uuid(), revision: z.number().int().nonnegative(),
@@ -58,7 +58,7 @@ export const createInitialState = (imageId: string, width: number, height: numbe
 
 const assignmentSchema = z.object({ parameter: z.enum(globalKeys), value: z.number().finite() }).strict();
 export const ChangeSetSchema = z.object({
-  globalAssignments: z.array(assignmentSchema).max(7), transform: TransformSchema.nullable(), regionUpserts: z.array(RegionSchema).max(4), regionDeletes: z.array(z.uuid()).max(4),
+  globalAssignments: z.array(assignmentSchema).max(11), transform: TransformSchema.nullable(), regionUpserts: z.array(RegionSchema).max(4), regionDeletes: z.array(z.uuid()).max(4),
 }).strict();
 export const ReasonSchema = z.object({ target: z.string().min(1).max(80), observation: z.string().max(160), intent: z.string().max(160) }).strict();
 export const PlanPayloadSchema = z.object({

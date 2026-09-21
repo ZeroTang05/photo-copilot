@@ -127,6 +127,7 @@ main {
 }
 
 .zoom {
+  position: relative;
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--border);
@@ -134,6 +135,10 @@ main {
   background: var(--bg-elev);
   overflow: hidden;
 }
+
+.zoom-popover { position: absolute; right: 0; top: calc(100% + 7px); z-index: 5; min-width: 78px; padding: 5px; display: grid; gap: 2px; border: 1px solid var(--border-strong); border-radius: 6px; background: #252a2e; box-shadow: 0 10px 28px #0008; }
+.zoom-popover button { justify-content: center; padding: 6px 8px; border: none; border-radius: 4px; }
+.active-tool { border-color: #86622d; background: var(--accent-bg); color: var(--accent-strong); }
 
 .zoom-btn, .zoom-fit, .zoom-menu {
   border: none;
@@ -449,6 +454,13 @@ canvas {
   border: 1px solid var(--accent);
   border-radius: 10px;
 }
+
+.region-editor { margin: 12px 0; padding: 12px 0 2px; border-top: 1px solid var(--border); }
+.region-editor-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.region-editor-head input { min-width: 0; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-elev); }
+.region-delete, .region-add-outside { justify-content: center; padding: 5px 8px; font-size: 12px; color: var(--text-mute); }
+.region-add-outside { width: 100%; margin: 8px 0 2px; }
+.region-hint { color: var(--text-faint); font-size: 12px; line-height: 1.5; margin: 4px 0 12px; }
 
 /* ============ Copilot panel ============ */
 
