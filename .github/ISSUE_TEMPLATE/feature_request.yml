@@ -1,0 +1,17 @@
+name: 功能建议
+description: 提出能改善照片编辑体验的建议
+title: "[建议] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: 使用场景
+      description: 请描述需要完成的照片编辑任务。
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 理想体验
+      description: 请描述希望看到的操作与结果。
+    validations:
+      required: true
