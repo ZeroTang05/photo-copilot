@@ -64,7 +64,10 @@ function getOrCreateSession(rawCookie: string | undefined, reply: { setCookie: (
 }
 function jpegSize(base64: string) { const bytes=Buffer.from(base64,'base64'); if(bytes.length<4 || bytes[0]!==0xff || bytes[1]!==0xd8) throw new Error('分析图片必须是 JPEG'); let i=2; while(i<bytes.length){ if(bytes[i]!==0xff){i++;continue;} const marker=bytes[i+1]; const len=bytes.readUInt16BE(i+2); if(marker !== undefined && marker>=0xc0 && marker<=0xc3) return {width:bytes.readUInt16BE(i+5),height:bytes.readUInt16BE(i+7)}; i+=2+len; } throw new Error('JPEG 尺寸读取失败'); }
 
-const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用户指令、当前编辑状态和两张缩略图,返回 JSON 格式的候选编辑计划。
+const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用户指令、当前编辑状态和缩略图,返回 JSON 格式的候选编辑计划。
+
+[图片顺序]
+第一张是原始照片，第二张是当前编辑效果。存在第三张时，它是用户提供的参考图：只参考其色彩、明暗、对比与整体氛围，应用到第二张照片；不可复制参考图里的主体、物体或构图。
 
 [输出契约 - 必须严格匹配的 JSON 字段]
 - status: 必填,枚举 "plan" | "clarify" | "unsupported"
@@ -119,7 +122,7 @@ app.post('/api/plan', async (request, reply) => {
   if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
   const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
   if(!config.apiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
-  let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
+  let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); if (parsed.referencePreview) jpegSize(parsed.referencePreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
   const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
   resetCounters(); if(session.attempts>=config.perSessionLimit || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
   const started=Date.now();
@@ -128,8 +131,8 @@ app.post('/api/plan', async (request, reply) => {
       provider,
       {
         instructions,
-        userText: JSON.stringify({ ...parsed, originalPreview: { ...parsed.originalPreview, base64: 'omitted' }, currentPreview: { ...parsed.currentPreview, base64: 'omitted' } }),
-        images: [{ base64: parsed.originalPreview.base64 }, { base64: parsed.currentPreview.base64 }],
+        userText: JSON.stringify({ ...parsed, originalPreview: { ...parsed.originalPreview, base64: 'omitted' }, currentPreview: { ...parsed.currentPreview, base64: 'omitted' }, ...(parsed.referencePreview ? { referencePreview: { ...parsed.referencePreview, base64: 'omitted' } } : {}) }),
+        images: [{ base64: parsed.originalPreview.base64 }, { base64: parsed.currentPreview.base64 }, ...(parsed.referencePreview ? [{ base64: parsed.referencePreview.base64 }] : [])],
       },
       { state: parsed.state, allowComposition: parsed.allowComposition, log: request.log },
     );

@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
 export const PlanRequestSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']),
-  instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema,
+  instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(),
   context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6),
 }).strict().superRefine((request, ctx) => {
   if (request.mode === 'followup' && !request.instruction.trim()) ctx.addIssue({ code: 'custom', message: '追问需要输入文字' });

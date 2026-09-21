@@ -17,7 +17,7 @@ interface Env {
 
 type Session = { attempts: number; day: string; requestIds: Record<string, number> };
 const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
-const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict();
+const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(), context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict();
 const today = () => new Date().toISOString().slice(0, 10);
 const error = (code: string, message: string, retryAfterSeconds: number | null = null) => ({ code, message, retryAfterSeconds });
 const response = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
@@ -71,18 +71,27 @@ async function quota(env: Env, input: object) {
   return env.AI_QUOTA.get(env.AI_QUOTA.idFromName('global')).fetch('https://quota.internal', { method: 'POST', body: JSON.stringify(input) });
 }
 
+function removeUnauthorizedComposition(payload: z.infer<typeof PlanPayloadSchema>, allowComposition: boolean) {
+  if (allowComposition || payload.status !== 'plan' || !payload.changes?.transform) return payload;
+  const changes = { ...payload.changes, transform: null };
+  const reasons = payload.reasons.filter((reason) => reason.target !== 'transform');
+  const hasEditableChange = changes.globalAssignments.length > 0 || changes.regionUpserts.length > 0 || changes.regionDeletes.length > 0;
+  if (hasEditableChange) return { ...payload, changes, reasons };
+  return { ...payload, status: 'clarify' as const, message: '当前没有授权 AI 调整构图，因此未生成可应用的调色修改。', changes: null, reasons: [], limitations: [...payload.limitations, '构图调整已忽略。'].slice(0, 3) };
+}
+
 async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse>) {
-  const compact = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' } });
-  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。';
+  const compact = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' }, ...(request.referencePreview ? { referencePreview: { ...request.referencePreview, base64: 'omitted' } } : {}) });
+  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。图片顺序：第一张原始照片，第二张当前编辑效果，存在第三张时是参考图；仅参考其色彩、明暗、对比与整体氛围，应用到第二张照片，不可复制主体、物体或构图。';
   const anthropic = env.AI_SDK === 'anthropic';
   const base = (env.AI_BASE_URL || (anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com/v1')).replace(/\/$/, '');
   const provider = anthropic
-    ? await fetch(`${base.endsWith('/v1') ? base : `${base}/v1`}/messages`, { method: 'POST', headers: { 'x-api-key': env.AI_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'claude-3-5-sonnet-latest', max_tokens: 6000, system: `${instructions} 只输出 JSON，不要使用 Markdown。`, messages: [{ role: 'user', content: [{ type: 'text', text: compact }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.originalPreview.base64 } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.currentPreview.base64 } }] }] }) })
-    : await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.AI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions, input: [{ role: 'user', content: [{ type: 'input_text', text: compact }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }] }], text: { format: { type: 'json_object' } } }) });
+    ? await fetch(`${base.endsWith('/v1') ? base : `${base}/v1`}/messages`, { method: 'POST', headers: { 'x-api-key': env.AI_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'claude-3-5-sonnet-latest', max_tokens: 6000, system: `${instructions} 只输出 JSON，不要使用 Markdown。`, messages: [{ role: 'user', content: [{ type: 'text', text: compact }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.originalPreview.base64 } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.currentPreview.base64 } }, ...(request.referencePreview ? [{ type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: request.referencePreview.base64 } }] : [])] }] }) })
+    : await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.AI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions, input: [{ role: 'user', content: [{ type: 'input_text', text: compact }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }, ...(request.referencePreview ? [{ type: 'input_image', image_url: `data:image/jpeg;base64,${request.referencePreview.base64}`, detail: 'high' }] : [])] }], text: { format: { type: 'json_object' } } }) });
   const body = await provider.json() as Record<string, any>;
   const raw = anthropic ? body.content?.find((item: Record<string, unknown>) => item.type === 'text')?.text : body.output_text;
   if (!provider.ok || !raw || (!anthropic && body.status !== 'completed')) throw new Error(`AI 请求失败 ${provider.status}`);
-  const payload = PlanPayloadSchema.parse(JSON.parse(String(raw).replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '')));
+  const payload = removeUnauthorizedComposition(PlanPayloadSchema.parse(JSON.parse(String(raw).replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, ''))), request.allowComposition);
   validatePlan(request.state, payload, request.allowComposition);
   return { payload, model: String(body.model), usage: body.usage ?? {} };
 }
