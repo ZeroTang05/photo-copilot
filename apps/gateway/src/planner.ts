@@ -1,6 +1,6 @@
 import type { EditState, PlanPayload } from '@photo-copilot/domain';
 import { PlanPayloadSchema, validatePlan } from '@photo-copilot/domain';
-import type { Provider, ProviderCallInput, ProviderCallResult, PlannerSuccess } from './providers/index';
+import type { Provider, ProviderCallInput, ProviderCallResult, PlannerSuccess } from './providers/index.js';
 
 const stripMarkdownFences = (s: string) => s.replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '').trim();
 

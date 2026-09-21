@@ -3,8 +3,8 @@ import Fastify from 'fastify';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { PlanRequestSchema, PlanResponseSchema } from '@photo-copilot/ai-contract';
 import { validatePlan } from '@photo-copilot/domain';
-import { createProvider, resolveProviderKind } from './providers/index';
-import { planWithRepair } from './planner';
+import { createProvider, resolveProviderKind } from './providers/index.js';
+import { planWithRepair } from './planner.js';
 
 const config = {
   provider: resolveProviderKind(process.env.AI_PROVIDER),
@@ -17,7 +17,7 @@ const config = {
   // 进程级秘钥——重启后旧 cookie 失效,但 AI 仍然可用(每次刷新会建新会话)。
   // 正式部署应在 .env 中固定此值,避免会话表全部失效。
   secret: process.env.SESSION_SECRET || randomUUID(),
-  origin: process.env.ALLOWED_ORIGIN ?? 'http://localhost:5173',
+  origins: (process.env.ALLOWED_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean),
   limit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT ?? 300),
   perSessionLimit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT_PER_SESSION ?? 30),
 };
@@ -26,7 +26,7 @@ const activeApiKey = config.provider === 'anthropic' ? config.anthropicApiKey : 
 const activeBaseURL = config.provider === 'anthropic' ? config.anthropicBaseURL : config.openaiBaseURL;
 const provider = createProvider(config.provider, { apiKey: activeApiKey, baseURL: activeBaseURL, model: config.model });
 
-const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 3 * 1024 * 1024 });
+export const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 3 * 1024 * 1024 });
 await app.register(cookie);
 const utcDay = () => new Date().toISOString().slice(0, 10);
 const sessions = new Map<string, { id: string; expiresAt: number; attempts: number; day: string; requestIds: Map<string, number> }>();
@@ -38,19 +38,31 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const REQ_DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
 function apiError(code: string, message: string, retryAfterSeconds: number | null = null) { return { code, message, retryAfterSeconds }; }
-function sameOrigin(request: { headers: Record<string, unknown> }) { const origin=request.headers.origin; return typeof origin === 'string' && origin === config.origin; }
+function sameOrigin(request: { headers: Record<string, unknown>; hostname: string }) {
+  const origin = request.headers.origin;
+  if (typeof origin !== 'string') return false;
+  if (config.origins.length > 0) return config.origins.includes(origin);
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const protocol = typeof forwardedProto === 'string' ? forwardedProto.split(',')[0] : 'http';
+  const host = typeof request.headers.host === 'string' ? request.headers.host : request.hostname;
+  return origin === `${protocol}://${host}`;
+}
+function isSecureRequest(request: { headers: Record<string, unknown> }) {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  return typeof forwardedProto === 'string' && forwardedProto.split(',')[0] === 'https';
+}
 function getSession(raw?: string) { if (!raw) return; const dot=raw.lastIndexOf('.'); if(dot<1) return; const id=raw.slice(0,dot), sig=raw.slice(dot+1), expected=sign(id); if(sig.length!==expected.length || !timingSafeEqual(Buffer.from(sig),Buffer.from(expected))) return; const session=sessions.get(id); if(!session || session.expiresAt<Date.now()) return; return { id, session }; }
 // 取得当前会话;若不存在则新建一个匿名会话并下发 cookie。
 // 移除邀请码门槛后,任何同源请求都会被自动签发 24 小时会话,速率限制仍按
 // 每会话 + 全局配额计数。
-function getOrCreateSession(rawCookie: string | undefined, reply: { setCookie: (name: string, value: string, opts: Record<string, unknown>) => void }, hostname: string) {
+function getOrCreateSession(rawCookie: string | undefined, reply: { setCookie: (name: string, value: string, opts: Record<string, unknown>) => void }, secure: boolean) {
   const existing = getSession(rawCookie);
   if (existing) return existing;
   const id = randomUUID();
   const session = { id, expiresAt: Date.now() + SESSION_TTL_MS, attempts: 0, day: utcDay(), requestIds: new Map<string, number>() };
   sessions.set(id, session);
   reply.setCookie('pc_session', cookieValue(id), {
-    httpOnly: true, sameSite: 'strict', secure: !hostname.startsWith('localhost'), path: '/', maxAge: SESSION_TTL_MS / 1000,
+    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: SESSION_TTL_MS / 1000,
   });
   return { id, session };
 }
@@ -97,7 +109,7 @@ const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用�
 9. 所有数组字段(observations、globalAssignments、regionUpserts、regionDeletes、reasons、limitations)即使为空也必须作为数组返回,不能省略字段、不能返回字符串或其他类型`;
 
 app.get('/api/session', async (request, reply) => {
-  const active = getOrCreateSession(request.cookies.pc_session, reply, request.hostname);
+  const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
   return { authenticated: true, remainingAttempts: Math.max(0, config.perSessionLimit - active.session.attempts), resetAt: `${utcDay()}T24:00:00.000Z` };
 });
 app.delete('/api/session', async (request, reply) => {
@@ -109,7 +121,7 @@ app.delete('/api/session', async (request, reply) => {
 });
 app.post('/api/plan', async (request, reply) => {
   if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
-  const active = getOrCreateSession(request.cookies.pc_session, reply, request.hostname);
+  const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
   if(!activeApiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
   let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
   const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
@@ -137,4 +149,3 @@ app.post('/api/plan', async (request, reply) => {
     return reply.code(502).send(apiError('PROVIDER_ERROR', '模型服务暂时不可用，可稍后重新请求'));
   }
 });
-app.listen({ port: Number(process.env.PORT ?? 8787), host: process.env.HOST ?? '127.0.0.1' });

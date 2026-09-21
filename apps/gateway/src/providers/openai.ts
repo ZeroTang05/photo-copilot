@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
-import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types';
-import { ProviderError } from './types';
+import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types.js';
+import { ProviderError } from './types.js';
 
 // OpenAI Responses API provider.
 //

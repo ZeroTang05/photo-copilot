@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { planPayloadJsonSchema } from '@photo-copilot/ai-contract';
-import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types';
-import { ProviderError } from './types';
+import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types.js';
+import { ProviderError } from './types.js';
 
 // Anthropic Messages API provider.
 //

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm build:deploy",
+  "outputDirectory": "apps/web/dist",
+  "functions": {
+    "api/[...path].ts": {
+      "maxDuration": 45
+    }
+  }
+}

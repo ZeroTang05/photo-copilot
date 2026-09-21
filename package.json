@@ -6,6 +6,8 @@
     "dev": "pnpm --filter @photo-copilot/domain build && pnpm --filter @photo-copilot/renderer build && pnpm --filter @photo-copilot/ai-contract build && pnpm --filter @photo-copilot/web dev",
     "dev:gateway": "pnpm --filter @photo-copilot/domain build && pnpm --filter @photo-copilot/ai-contract build && pnpm --filter @photo-copilot/gateway dev",
     "build": "pnpm -r build",
+    "typecheck:deploy": "tsc -p tsconfig.deploy.json",
+    "build:deploy": "pnpm --filter @photo-copilot/domain build && pnpm --filter @photo-copilot/renderer build && pnpm --filter @photo-copilot/ai-contract build && pnpm typecheck:deploy && pnpm --filter @photo-copilot/web build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @photo-copilot/domain test"
   },
