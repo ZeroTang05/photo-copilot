@@ -14,5 +14,15 @@
   "devDependencies": {
     "@types/node": "24.5.2",
     "typescript": "5.9.2"
+  },
+  "cloudflare": {
+    "bindings": {
+      "OPENAI_API_KEY": {
+        "description": "用于生成照片编辑建议的 OpenAI 或兼容服务密钥"
+      },
+      "SESSION_SECRET": {
+        "description": "用于保护会话 Cookie 的随机长字符串"
+      }
+    }
   }
 }

@@ -45,7 +45,13 @@ pnpm dev:gateway
 
 项目可单独部署到 Vercel，也可单独部署到 Cloudflare Workers。Cloudflare 版本提供持久化的会话额度控制。
 
-完整步骤见 [部署说明](docs/DEPLOYMENT.md)。自动发布配置见 [自动发布说明](docs/AUTOMATED_DEPLOYMENTS.md)。
+部署完成后，平台会自动连接 Fork 后的仓库。后续推送到默认分支时，平台会自动发布新版本。
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=OPENAI_API_KEY%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot)
+
+Vercel 部署页面会要求填写 OpenAI Key、模型名称和会话密钥。Cloudflare 部署页面会要求填写 OpenAI Key 和会话密钥。完整步骤见 [部署说明](docs/DEPLOYMENT.md)。
 
 ## 参与贡献
 
