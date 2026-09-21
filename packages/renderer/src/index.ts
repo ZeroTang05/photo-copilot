@@ -41,8 +41,16 @@ vec3 sampleImage(vec2 uv){
   return mix(mix(decode(texture(u_image,a).rgb),decode(texture(u_image,b).rgb),f.x),mix(decode(texture(u_image,c).rgb),decode(texture(u_image,d).rgb),f.x),f.y);
 }
 void main(){
-  vec2 q=u_crop.xy+v_uv*u_crop.zw; vec2 r=q-.5; float cs=cos(u_angle),sn=sin(u_angle); vec2 uv=vec2(cs*r.x+sn*r.y,-sn*r.x+cs*r.y)+.5;
-  vec3 base=sampleImage(clamp(uv,0.,1.)); float w=u_warmth,t=u_tint; vec3 gain=vec3(exp2(.25*w),exp2(-.20*t),exp2(-.25*w)); gain/=lum(gain); base*=gain;
+  // 自动裁切：旋转后选取能够完全落入原裁切区的最大同画幅矩形。
+  // x 轴按像素宽高比校正，保证非正方形照片旋转时保持真实几何比例。
+  float cs=cos(u_angle),sn=sin(u_angle),absCs=abs(cs),absSn=abs(sn);
+  float cropAspect=(u_size.x*u_crop.z)/(u_size.y*u_crop.w);
+  float autoScale=min(cropAspect/(absCs*cropAspect+absSn),1./(absSn*cropAspect+absCs));
+  vec2 centered=(v_uv-.5)*autoScale;
+  vec2 visual=vec2(centered.x*cropAspect,centered.y);
+  vec2 rotated=vec2(cs*visual.x+sn*visual.y,-sn*visual.x+cs*visual.y);
+  vec2 uv=u_crop.xy+u_crop.zw*.5+vec2(rotated.x/cropAspect*u_crop.z,rotated.y*u_crop.w);
+  vec3 base=sampleImage(uv); float w=u_warmth,t=u_tint; vec3 gain=vec3(exp2(.25*w),exp2(-.20*t),exp2(-.25*w)); gain/=lum(gain); base*=gain;
   base*=exp2(u_exposure); float y=clamp(lum(base),0.,1.);
   // 区域:高光 / 阴影(已有)
   base*=exp2(u_shadows*(1.-smoothstep(.05,.5,y))+u_highlights*smoothstep(.45,.95,y));
@@ -98,9 +106,10 @@ export class PhotoRenderer {
     const pos = gl.getAttribLocation(program, 'a_position'); gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
-  async load(blob: Blob) { this.bitmap?.close(); this.bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' }); const gl=this.gl; gl.bindTexture(gl.TEXTURE_2D,this.texture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,this.bitmap); /* FLIP_Y 在本路径无效,方向纠正由 vertex 内的 uv.y 翻转承担 */ }
-  render(state: EditState, width = this.canvas.clientWidth, height = this.canvas.clientHeight) {
-    if (!this.bitmap) return; const gl=this.gl; const ratio = devicePixelRatio || 1; this.canvas.width=Math.max(1,Math.round(width*ratio)); this.canvas.height=Math.max(1,Math.round(height*ratio)); gl.viewport(0,0,this.canvas.width,this.canvas.height); gl.useProgram(this.program);
+  async load(blob: Blob) { this.loadBitmap(await createImageBitmap(blob, { imageOrientation: 'from-image' })); }
+  loadBitmap(bitmap: ImageBitmap) { this.bitmap?.close(); this.bitmap = bitmap; const gl=this.gl; gl.bindTexture(gl.TEXTURE_2D,this.texture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,this.bitmap); /* FLIP_Y 在本路径无效,方向纠正由 vertex 内的 uv.y 翻转承担 */ }
+  render(state: EditState, width = this.canvas.clientWidth, height = this.canvas.clientHeight, pixelRatio = devicePixelRatio || 1) {
+    if (!this.bitmap) return; const gl=this.gl; this.canvas.width=Math.max(1,Math.round(width*pixelRatio)); this.canvas.height=Math.max(1,Math.round(height*pixelRatio)); gl.viewport(0,0,this.canvas.width,this.canvas.height); gl.useProgram(this.program);
     const uniform=(name:string)=>gl.getUniformLocation(this.program,name); const g=state.global;
     gl.uniform2f(uniform('u_size'),state.sourceWidth,state.sourceHeight); gl.uniform2f(uniform('u_output'),this.canvas.width,this.canvas.height);
     gl.uniform1f(uniform('u_exposure'),g.exposureEV); gl.uniform1f(uniform('u_contrast'),g.contrast/100); gl.uniform1f(uniform('u_highlights'),g.highlights/100); gl.uniform1f(uniform('u_shadows'),g.shadows/100); gl.uniform1f(uniform('u_whites'),g.whites/100); gl.uniform1f(uniform('u_blacks'),g.blacks/100); gl.uniform1f(uniform('u_clarity'),g.clarity/100); gl.uniform1f(uniform('u_warmth'),g.warmth/100); gl.uniform1f(uniform('u_tint'),g.tint/100); gl.uniform1f(uniform('u_vibrance'),g.vibrance/100); gl.uniform1f(uniform('u_saturation'),g.saturation/100);
@@ -120,6 +129,24 @@ export class PhotoRenderer {
     gl.uniform4fv(uniform('u_regions'),regions); gl.uniform4fv(uniform('u_local'),locals); gl.uniform4fv(uniform('u_meta'),meta); gl.uniform1i(uniform('u_brushCount'),brushCount); gl.uniform4fv(uniform('u_brushDabs'),brushDabs); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
   async analysisBlob(state: EditState, maxEdge=1024) { const width=this.bitmap!.width, height=this.bitmap!.height, scale=Math.min(1,maxEdge/Math.max(width,height)); const canvas=document.createElement('canvas'); canvas.width=Math.round(width*scale); canvas.height=Math.round(height*scale); const renderer=new PhotoRenderer(canvas); await renderer.load(await this.toBlob()); renderer.render({ ...state, transform: { ...state.transform, angleDeg: 0, crop: {x:0,y:0,width:1,height:1} } },canvas.width,canvas.height); return new Promise<Blob>((resolve,reject)=>canvas.toBlob((blob)=>blob?resolve(blob):reject(new Error('缩略图编码失败')),'image/jpeg',.85)); }
-  toBlob(quality=.92) { return new Promise<Blob>((resolve,reject)=>this.canvas.toBlob((blob)=>blob?resolve(blob):reject(new Error('JPEG 编码失败')),'image/jpeg',quality)); }
+  // 浏览器负责图片编码；若格式不受支持，canvas 会退回 PNG，这里直接报错以避免文件扩展名与真实内容不一致。
+  toBlob(quality=.92, type: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/avif' = 'image/jpeg') {
+    return new Promise<Blob>((resolve,reject)=>this.canvas.toBlob((blob)=>{
+      if (!blob) { reject(new Error('图片编码失败')); return; }
+      if (blob.type !== type) { reject(new Error(`当前浏览器不支持 ${type.replace('image/', '').toUpperCase()} 导出`)); return; }
+      resolve(blob);
+    },type,type === 'image/png' ? undefined : quality));
+  }
+  /** 读取顶端朝上的 RGBA 像素，用于交给 TIFF 等无损编码器。 */
+  rgbaPixels() {
+    const bottomUp = new Uint8Array(this.canvas.width * this.canvas.height * 4);
+    this.gl.readPixels(0, 0, this.canvas.width, this.canvas.height, this.gl.RGBA, this.gl.UNSIGNED_BYTE, bottomUp);
+    const topDown = new Uint8Array(bottomUp.length);
+    const rowLength = this.canvas.width * 4;
+    for (let y = 0; y < this.canvas.height; y += 1) {
+      topDown.set(bottomUp.subarray((this.canvas.height - y - 1) * rowLength, (this.canvas.height - y) * rowLength), y * rowLength);
+    }
+    return topDown;
+  }
   dispose(){ this.bitmap?.close(); this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program); }
 }
