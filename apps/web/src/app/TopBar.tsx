@@ -6,7 +6,7 @@ interface TopBarProps {
   canRedo: boolean;
   exporting: boolean;
   zoom: number;
-  onImport: (file: File) => void;
+  onImport: (files: File[]) => void;
   onUndo: () => void;
   onRedo: () => void;
   onCompareStart: () => void;
@@ -73,14 +73,14 @@ const IconExport = () => (
 export function TopBar(props: TopBarProps) {
   const [showZoomMenu, setShowZoomMenu] = useState(false);
   const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) props.onImport(file);
+    const files = Array.from(event.target.files ?? []);
+    if (files.length > 0) props.onImport(files);
     event.target.value = '';
   };
   return (
     <header className="toolbar">
       <label className="import">
-        <input type="file" accept="image/jpeg,image/png" onChange={handleFile} />
+        <input type="file" accept="image/jpeg,image/png" multiple onChange={handleFile} />
         <IconImport />
         <span>导入</span>
       </label>

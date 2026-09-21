@@ -85,9 +85,11 @@ export function App() {
   const [zoom, setZoom] = useState(100);
   const [copilotOpen, setCopilotOpen] = useState(true);
   const [activeBrushRegionId, setActiveBrushRegionId] = useState<string>();
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
+  const dragDepthRef = useRef(0);
 
   const displayState = useMemo<EditState | undefined>(() => {
     if (!state) return undefined;
@@ -177,6 +179,14 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '图片无法解码');
     }
+  };
+
+  // 批量导入按顺序解码，避免多张高像素照片同时占用大量内存。
+  const handleImports = (files: File[]) => {
+    void (async () => {
+      for (const file of files) await handleImport(file);
+      if (files.length > 1) setStatus(`已导入 ${files.length} 张图片，可在左侧切换编辑`);
+    })();
   };
 
   const handleGlobalChange = (key: GlobalKey, value: number) => {
@@ -393,13 +403,31 @@ export function App() {
   };
 
   return (
-    <main onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void handleImport(file); }}>
+    <main
+      className={isDraggingFiles ? 'dragging-files' : undefined}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        dragDepthRef.current += 1;
+        setIsDraggingFiles(true);
+      }}
+      onDragLeave={() => {
+        dragDepthRef.current -= 1;
+        if (dragDepthRef.current <= 0) { dragDepthRef.current = 0; setIsDraggingFiles(false); }
+      }}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setIsDraggingFiles(false);
+        handleImports(Array.from(event.dataTransfer.files));
+      }}
+    >
       <TopBar
         hasState={Boolean(state)}
         canUndo={Boolean(currentSlot && currentSlot.history.length > 0)}
         canRedo={Boolean(currentSlot && currentSlot.future.length > 0)}
         exporting={exporting}
-        onImport={handleImport}
+        onImport={handleImports}
         onUndo={undo}
         onRedo={redo}
         onCompareStart={handleCompareStart}
@@ -423,6 +451,7 @@ export function App() {
               removeImage(index);
               setStatus('已从当前会话移除图片');
             }}
+            onImport={handleImports}
           />
           <div className="canvasWrap" onWheel={(event) => { if (!state) return; event.preventDefault(); setZoom((value) => Math.min(200, Math.max(25, value + (event.deltaY < 0 ? 10 : -10)))); }}>
             <canvas
@@ -470,6 +499,7 @@ export function App() {
           onResetCrop={handleResetCrop}
         />
       </section>
+      {isDraggingFiles && <div className="drop-overlay" aria-live="polite">松开即可导入照片</div>}
     </main>
   );
 }

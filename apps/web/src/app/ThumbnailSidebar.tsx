@@ -1,3 +1,4 @@
+import type { ChangeEvent } from 'react';
 import type { ImageSlot } from '../state/editor';
 
 interface ThumbnailSidebarProps {
@@ -5,6 +6,7 @@ interface ThumbnailSidebarProps {
   activeIndex: number;
   onSelect: (index: number) => void;
   onRemove: (index: number) => void;
+  onImport: (files: File[]) => void;
 }
 
 const IconPlus = () => (
@@ -21,8 +23,13 @@ const IconClose = () => (
   </svg>
 );
 
-export function ThumbnailSidebar({ images, activeIndex, onSelect, onRemove }: ThumbnailSidebarProps) {
+export function ThumbnailSidebar({ images, activeIndex, onSelect, onRemove, onImport }: ThumbnailSidebarProps) {
   const slots = images.length > 0 ? images : [];
+  const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length > 0) onImport(files);
+    event.target.value = '';
+  };
   return (
     <aside className="thumbnails">
       {slots.map((slot, index) => (
@@ -47,11 +54,11 @@ export function ThumbnailSidebar({ images, activeIndex, onSelect, onRemove }: Th
           )}
         </div>
       ))}
-      {slots.length === 0 && (
-        <div className="thumbnail-empty" aria-hidden="true">
-          <IconPlus />
-        </div>
-      )}
+      <label className={`thumbnail-add ${slots.length === 0 ? 'thumbnail-empty' : ''}`} aria-label="添加照片">
+        <input type="file" accept="image/jpeg,image/png" multiple onChange={handleFile} />
+        <IconPlus />
+        <span>添加</span>
+      </label>
     </aside>
   );
 }
