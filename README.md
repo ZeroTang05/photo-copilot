@@ -45,7 +45,7 @@ pnpm dev:gateway
 
 项目可单独部署到 Vercel，也可单独部署到 Cloudflare Workers。Cloudflare 版本提供持久化的会话额度控制。
 
-完整步骤见 [部署说明](docs/DEPLOYMENT.md)。
+完整步骤见 [部署说明](docs/DEPLOYMENT.md)。自动发布配置见 [自动发布说明](docs/AUTOMATED_DEPLOYMENTS.md)。
 
 ## 参与贡献
 
