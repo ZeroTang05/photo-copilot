@@ -49,15 +49,15 @@ pnpm dev:gateway
 
 ### Vercel
 
-选择一个 AI 服务商后点击部署。部署页面会显示需要填写的全部环境变量。
+部署页面会显示需要填写的全部环境变量，默认填入 OpenAI 的可用配置。使用 Anthropic 时，将 `AI_SDK` 改为 `anthropic`，将 `AI_BASE_URL` 改为 `https://api.anthropic.com`，并填写对应的模型名称。
 
-[![Deploy OpenAI SDK with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_SDK%2CAI_API_KEY%2CAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_SDK%22%3A%22openai%22%2C%22AI_BASE_URL%22%3A%22https%3A%2F%2Fapi.openai.com%2Fv1%22%2C%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+[![Deploy to Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_SDK%2CAI_API_KEY%2CAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_SDK%22%3A%22openai%22%2C%22AI_BASE_URL%22%3A%22https%3A%2F%2Fapi.openai.com%2Fv1%22%2C%22AI_MODEL%22%3A%22gpt-4o-mini%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
 
-[![Deploy Anthropic SDK with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot&project-name=photo-copilot&repository-name=photo-copilot&env=AI_SDK%2CAI_API_KEY%2CAI_BASE_URL%2CAI_MODEL%2CSESSION_SECRET&envDefaults=%7B%22AI_SDK%22%3A%22anthropic%22%2C%22AI_BASE_URL%22%3A%22https%3A%2F%2Fapi.anthropic.com%22%7D&envLink=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot%2Fblob%2Fmain%2Fdocs%2FDEPLOYMENT.md)
+首次部署后，打开 Vercel 项目中的 **Settings → Environment Variables**，将 `AI_API_KEY` 与 `SESSION_SECRET` 标记为 **Sensitive**（敏感变量）。
 
 ### Cloudflare
 
-Cloudflare 原生 Worker 支持 OpenAI SDK 和 Anthropic SDK。部署页面会要求填写 SDK、Key、接口地址、模型名称和会话密钥。接口地址留空时使用所选 SDK 的官方地址。
+Cloudflare 原生 Worker 支持 OpenAI SDK 和 Anthropic SDK。部署页面只会要求填写 `AI_API_KEY` 和 `SESSION_SECRET` 两个密钥；SDK、接口地址与模型名称是可编辑的公开配置。接口地址留空时使用所选 SDK 的官方地址。
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FZeroTang05%2Fphoto-copilot)
 

@@ -5,6 +5,11 @@
   "compatibility_date": "2026-09-20",
   "durable_objects": { "bindings": [{ "name": "AI_QUOTA", "class_name": "AiQuota" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AiQuota"] }],
+  "vars": {
+    "AI_SDK": "openai",
+    "AI_BASE_URL": "",
+    "AI_MODEL": "gpt-4o-mini"
+  },
   "assets": {
     "directory": "./apps/web/dist",
     "binding": "ASSETS",
