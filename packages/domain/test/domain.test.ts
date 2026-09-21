@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyChanges, ChangeSetSchema, createInitialState, DomainError, globalKeys, RegionSchema } from '../src/index.ts';
+import { applyChanges, ChangeSetSchema, createInitialState, DomainError, globalKeys, RegionSchema, TransformSchema } from '../src/index.ts';
 
 describe('领域事务', () => {
   it('以绝对值更新参数且保留未涉及字段', () => {
@@ -43,5 +43,10 @@ describe('领域事务', () => {
       regionDeletes: [],
     });
     expect(changes.globalAssignments).toHaveLength(11);
+  });
+
+  it('允许负 180 到正 180 度的自动裁切旋转角度', () => {
+    const transform = TransformSchema.parse({ angleDeg: -180, crop: { x: 0, y: 0, width: 1, height: 1 }, aspectLock: 'original' });
+    expect(transform.angleDeg).toBe(-180);
   });
 });

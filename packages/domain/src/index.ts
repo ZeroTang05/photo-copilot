@@ -32,7 +32,7 @@ export const LocalAdjustmentsSchema = z.object({ exposureEV: finite(-2, 2), high
 export const CropSchema = z.object({ x: finite(0, 1), y: finite(0, 1), width: finite(0.000001, 1), height: finite(0.000001, 1) }).strict()
   .refine((crop) => crop.x + crop.width <= 1.00000001 && crop.y + crop.height <= 1.00000001, '裁切超出旋转画布');
 export const TransformSchema = z.object({
-  angleDeg: finite(-10, 10), crop: CropSchema, aspectLock: z.enum(['free', 'original', 'square', 'portrait4x5', 'landscape3x2', 'wide16x9']),
+  angleDeg: finite(-180, 180), crop: CropSchema, aspectLock: z.enum(['free', 'original', 'square', 'portrait4x5', 'landscape3x2', 'wide16x9']),
 }).strict();
 export const BrushDabSchema = z.object({ x: finite(0, 1), y: finite(0, 1) }).strict();
 export const RegionSchema = z.object({
