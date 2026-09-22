@@ -667,6 +667,7 @@ export function App() {
       })));
       const next = prepared.filter(Boolean).slice(0, 8) as SamCandidate[];
       setSamCandidates(next);
+      if (next.length) setRightPanelOpen(true);
       setStatus(next.length ? `已找到 ${next.length} 个选区，选择一个加入局部调整` : 'SAM3 没有找到可用选区');
     } catch (error) {
       if ((error as DOMException).name === 'AbortError') setStatus('已取消 SAM3 识别');
@@ -701,6 +702,7 @@ export function App() {
       if (revision !== pointRevisionRef.current) return;
       const next = prepared.filter(Boolean).slice(0, 8) as SamCandidate[];
       setSamCandidates(next);
+      if (next.length) setRightPanelOpen(true);
       setStatus(next.length ? '已生成待确认选区，可加入局部调整或继续点选' : 'SAM3 没有生成可用选区');
     } catch (error) {
       if ((error as DOMException).name === 'AbortError') return;
@@ -853,11 +855,6 @@ export function App() {
             referencePhoto={referencePhoto}
             onReferenceImport={(file) => void handleReferenceImport(file)}
             onRemoveReference={() => { controllerRef.current?.abort(); setReferencePhoto(undefined); setCandidate(); setStatus('已移除参考图'); }}
-            samCandidates={samCandidates}
-            onApplySamCandidate={(candidateId) => {
-              const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);
-              if (item) applySamCandidate(item);
-            }}
           />}
         </div>
         {rightPanelOpen && <ControlsPanel
@@ -871,6 +868,11 @@ export function App() {
           onAspectLockChange={handleAspectLockChange}
           onAddRegion={handleAddRegion}
           regionCount={state?.regions.length ?? 0}
+          samCandidates={samCandidates}
+          onApplySamCandidate={(candidateId) => {
+            const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);
+            if (item) applySamCandidate(item);
+          }}
           onUpdateRegion={handleUpdateRegion}
           onDeleteRegion={handleDeleteRegion}
           activeBrushRegionId={activeBrushRegionId}

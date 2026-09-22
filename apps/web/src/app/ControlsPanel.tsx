@@ -12,6 +12,8 @@ interface ControlsPanelProps {
   onAspectLockChange: (value: EditState['transform']['aspectLock']) => void;
   onAddRegion: (shape?: Region['shape'], mode?: Region['mode']) => void;
   regionCount: number;
+  samCandidates: Array<{ candidateId: string; displayLabel: string; areaRatio: number }>;
+  onApplySamCandidate: (candidateId: string) => void;
   onUpdateRegion: (region: Region, transient?: boolean) => void;
   onDeleteRegion: (regionId: string) => void;
   activeBrushRegionId?: string;
@@ -329,6 +331,13 @@ export function ControlsPanel(props: ControlsPanelProps) {
             +
           </button>
         </summary>
+        {props.samCandidates.length > 0 && <div className="sam-region-candidates" aria-label="AI 识别选区">
+          <strong>AI 识别选区</strong>
+          <p className="region-hint">选择一个选区后，它会加入下方的局部调整，并可用画笔继续修正。</p>
+          {props.samCandidates.map((candidate) => <button key={candidate.candidateId} className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onApplySamCandidate(candidate.candidateId)}>
+            使用「{candidate.displayLabel}」（覆盖 {Math.round(candidate.areaRatio * 100)}%）
+          </button>)}
+        </div>}
         {state?.regions.map((region) => <RegionEditor key={region.id} region={region} disabled={disabled} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} activeBrushRegionId={props.activeBrushRegionId} onPaintBrush={props.onPaintBrush} activeRasterPaint={props.activeRasterPaint} onPaintRaster={props.onPaintRaster} />)}
         {regionCount === 0 && <p className="region-hint">使用椭圆、线性渐变或画笔蒙版，独立调整局部光线与颜色。</p>}
         <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('ellipse', 'outside')}>添加椭圆外径向蒙版</button>
