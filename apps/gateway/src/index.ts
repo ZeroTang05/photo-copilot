@@ -76,9 +76,9 @@ const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用�
 - observations: 字符串数组,最多 3 项,每项最多 160 字符
 - message: 字符串,最多 300 字符
 - changes: 当 status="plan" 时必填;其余状态传 null
-  - globalAssignments: 数组,最多 11 项,每项 { parameter, value },无修改时必须返回 []
-    - parameter 枚举: exposureEV | contrast | highlights | shadows | whites | blacks | clarity | warmth | tint | vibrance | saturation
-    - value 是绝对目标值,exposureEV ∈ [-2, 2],其余 ∈ [-100, 100]
+  - globalAssignments: 数组,最多 14 项,每项 { parameter, value },无修改时必须返回 []
+    - parameter 枚举: exposureEV | contrast | highlights | shadows | whites | blacks | clarity | dehaze | denoiseLuma | denoiseChroma | warmth | tint | vibrance | saturation
+    - value 是绝对目标值,exposureEV ∈ [-2, 2]，dehaze、denoiseLuma、denoiseChroma ∈ [0, 100] 且为整数，其余 ∈ [-100, 100]
   - transform: Transform 对象或 null
   - regionUpserts: 数组,最多 4 项(已有 id 表示更新,新 id 表示创建),无变更时必须返回 []
   - regionDeletes: UUID 字符串数组,最多 4 项,无删除时必须返回 []
@@ -97,6 +97,9 @@ const instructions = `你是 Photo Copilot 的照片编辑规划器。根据用�
 - tint 色调:绿↔品红。负值偏绿,正值偏品红。配合 warmth 修正非中性白平衡。
 - vibrance 自然饱和度:非线性饱和度,优先提升低饱和色,对肤色和已饱和色更柔和。常用于"画面更鲜亮但不要过"。
 - saturation 饱和度:线性饱和度,正负对所有颜色同等放大或缩小。
+- dehaze 去雾:减轻空气雾气造成的发白和低对比。自动建议保持保守；过高会让天空显脏。
+- denoiseLuma 明度降噪:减轻亮暗颗粒。数值越高，细纹理也会更平滑。
+- denoiseChroma 颜色降噪:减轻暗部红绿蓝杂点。数值越高，细小颜色变化会更平滑。
 
 [行为规则]
 1. value 是当前状态之上的绝对目标值,不是相对增量
@@ -174,7 +177,7 @@ app.post('/api/plan', async (request, reply) => {
     );
     const response = PlanResponseSchema.parse({
       requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision,
-      planId: randomUUID(), model: result.model, promptVersion: 'pc-planner-1', rendererVersion: 'pc-render-1',
+      planId: randomUUID(), model: result.model, promptVersion: 'pc-planner-1', rendererVersion: 'pc-render-2',
       payload,
       usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cachedInputTokens: result.usage.cachedInputTokens, attempts, durationMs: Date.now() - started },
     });

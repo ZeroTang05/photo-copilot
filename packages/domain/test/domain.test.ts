@@ -35,14 +35,24 @@ describe('领域事务', () => {
     expect(brush.brushDabs).toHaveLength(2);
   });
 
-  it('允许一个计划覆盖全部十一项全局调色参数', () => {
+  it('允许一个计划覆盖全部十四项全局调色参数', () => {
     const changes = ChangeSetSchema.parse({
       globalAssignments: globalKeys.map((parameter) => ({ parameter, value: parameter === 'exposureEV' ? .2 : 1 })),
       transform: null,
       regionUpserts: [],
       regionDeletes: [],
     });
-    expect(changes.globalAssignments).toHaveLength(11);
+    expect(changes.globalAssignments).toHaveLength(14);
+  });
+
+  it('验证去雾与两种降噪的整数范围', () => {
+    const state = createInitialState('8c7955ce-5f1e-4c37-b927-9460e7791c30', 1600, 900);
+    const next = applyChanges(state, {
+      globalAssignments: [{ parameter: 'dehaze', value: 25 }, { parameter: 'denoiseLuma', value: 40 }, { parameter: 'denoiseChroma', value: 60 }],
+      transform: null, regionUpserts: [], regionDeletes: [],
+    });
+    expect(next.global).toMatchObject({ dehaze: 25, denoiseLuma: 40, denoiseChroma: 60 });
+    expect(() => applyChanges(state, { globalAssignments: [{ parameter: 'dehaze', value: 101 }], transform: null, regionUpserts: [], regionDeletes: [] })).toThrow();
   });
 
   it('使用中文参数名称生成编辑摘要', () => {

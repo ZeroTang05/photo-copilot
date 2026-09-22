@@ -1,12 +1,12 @@
 import { z } from 'zod';
 
-export const SCHEMA_VERSION = 1 as const;
-export const RENDERER_VERSION = 'pc-render-1' as const;
+export const SCHEMA_VERSION = 2 as const;
+export const RENDERER_VERSION = 'pc-render-2' as const;
 // 全局可调参数顺序与区间见 docs/COLOR-GRADING.md §4.1。
 // 新增顺序遵循"光-色分区命名",与 Lightroom / Capture One / DaVinci 三方共识对齐。
 export const globalKeys = [
   'exposureEV', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'clarity',
-  'warmth', 'tint', 'vibrance', 'saturation',
+  'dehaze', 'denoiseLuma', 'denoiseChroma', 'warmth', 'tint', 'vibrance', 'saturation',
 ] as const;
 export type GlobalKey = (typeof globalKeys)[number];
 
@@ -19,6 +19,9 @@ export const globalParameterLabels: Record<GlobalKey, string> = {
   whites: '白色色阶',
   blacks: '黑色色阶',
   clarity: '清晰度',
+  dehaze: '去雾',
+  denoiseLuma: '明度降噪',
+  denoiseChroma: '颜色降噪',
   warmth: '色温',
   tint: '色调',
   vibrance: '自然饱和度',
@@ -37,6 +40,10 @@ export const GlobalSchema = z.object({
   // 中间调边缘对比度(Lightroom Clarity / C1 Clarity / DV Midtone Detail)。
   // 渲染端采用无邻域采样的中间调对比近似,见 renderer shader 注释。
   clarity: finite(-100, 100),
+  // 这三项在 Worker 中预处理原始图片，范围独立于 WebGL 调色参数。
+  dehaze: z.number().finite().int().min(0).max(100),
+  denoiseLuma: z.number().finite().int().min(0).max(100),
+  denoiseChroma: z.number().finite().int().min(0).max(100),
   warmth: finite(-100, 100),
   tint: finite(-100, 100),
   // 非线性饱和度(Lightroom Vibrance / DV Color Boost)。低饱和色优先提升。
@@ -71,7 +78,7 @@ export type Transform = z.infer<typeof TransformSchema>;
 
 export const defaultGlobal = (): z.infer<typeof GlobalSchema> => ({
   exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, clarity: 0,
-  warmth: 0, tint: 0, vibrance: 0, saturation: 0,
+  dehaze: 0, denoiseLuma: 0, denoiseChroma: 0, warmth: 0, tint: 0, vibrance: 0, saturation: 0,
 });
 export const createInitialState = (imageId: string, width: number, height: number): EditState => EditStateSchema.parse({
   schemaVersion: SCHEMA_VERSION, rendererVersion: RENDERER_VERSION, imageId, revision: 0, sourceWidth: width, sourceHeight: height,
@@ -80,7 +87,7 @@ export const createInitialState = (imageId: string, width: number, height: numbe
 
 const assignmentSchema = z.object({ parameter: z.enum(globalKeys), value: z.number().finite() }).strict();
 export const ChangeSetSchema = z.object({
-  globalAssignments: z.array(assignmentSchema).max(11), transform: TransformSchema.nullable(), regionUpserts: z.array(RegionSchema).max(4), regionDeletes: z.array(z.uuid()).max(4),
+  globalAssignments: z.array(assignmentSchema).max(globalKeys.length), transform: TransformSchema.nullable(), regionUpserts: z.array(RegionSchema).max(4), regionDeletes: z.array(z.uuid()).max(4),
 }).strict();
 export const ReasonSchema = z.object({ target: z.string().min(1).max(80), observation: z.string().max(160), intent: z.string().max(160) }).strict();
 export const PlanPayloadSchema = z.object({

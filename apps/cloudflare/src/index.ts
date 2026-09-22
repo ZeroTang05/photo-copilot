@@ -196,7 +196,7 @@ async function requestPlanFromProvider(
 }
 
 async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse>, requestId: string) {
-  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2，其余范围 -100 到 100。value 为绝对值。每项修改必须有 reasons。构图未授权时 transform 为 null。所有数组字段（包括 regionDeletes、brushDabs）即使为空也必须返回 []，禁止返回空字符串。只要存在任意变更，reasons 必须为每个变更目标给出对应解释。图片顺序：第一张原始照片，第二张当前编辑效果，存在第三张时是参考图；仅参考其色彩、明暗、对比与整体氛围，应用到第二张照片，不可复制主体、物体或构图。';
+  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、dehaze、denoiseLuma、denoiseChroma、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2；dehaze、denoiseLuma、denoiseChroma 为 0 到 100 的整数；其余范围 -100 到 100。value 为绝对值。去雾减轻可见雾气，降噪减弱颗粒并可能平滑纹理；初次自动建议保持保守。每项修改必须有 reasons。构图未授权时 transform 为 null。所有数组字段（包括 regionDeletes、brushDabs）即使为空也必须返回 []，禁止返回空字符串。只要存在任意变更，reasons 必须为每个变更目标给出对应解释。图片顺序：第一张原始照片，第二张当前编辑效果，存在第三张时是参考图；仅参考其色彩、明暗、对比与整体氛围，应用到第二张照片，不可复制主体、物体或构图。';
   const initial = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' }, ...(request.referencePreview ? { referencePreview: { ...request.referencePreview, base64: 'omitted' } } : {}) });
   let userText = initial;
   let totalUsage: Record<string, unknown> = {};
