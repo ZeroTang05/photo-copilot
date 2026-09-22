@@ -10,6 +10,21 @@ export const globalKeys = [
 ] as const;
 export type GlobalKey = (typeof globalKeys)[number];
 
+/** 编辑器和 AI 摘要共用的中文参数名称。 */
+export const globalParameterLabels: Record<GlobalKey, string> = {
+  exposureEV: '曝光',
+  contrast: '对比度',
+  highlights: '高光',
+  shadows: '阴影',
+  whites: '白色色阶',
+  blacks: '黑色色阶',
+  clarity: '清晰度',
+  warmth: '色温',
+  tint: '色调',
+  vibrance: '自然饱和度',
+  saturation: '饱和度',
+};
+
 const finite = (min: number, max: number) => z.number().finite().min(min).max(max);
 export const GlobalSchema = z.object({
   exposureEV: finite(-2, 2),
@@ -115,6 +130,8 @@ export function validatePlan(state: EditState, payload: PlanPayload, allowCompos
   if (JSON.stringify(state) === JSON.stringify(next) && payload.reasons.length) throw new DomainError('无变化计划不能有解释');
 }
 export function changedSummary(before: EditState, after: EditState): string {
-  const changes = globalKeys.filter((key) => before.global[key] !== after.global[key]).map((key) => `${key} ${before.global[key]}→${after.global[key]}`);
+  const changes = globalKeys
+    .filter((key) => before.global[key] !== after.global[key])
+    .map((key) => `${globalParameterLabels[key]} ${before.global[key]}→${after.global[key]}`);
   return changes.length ? changes.join('，') : '已更新构图或局部区域';
 }

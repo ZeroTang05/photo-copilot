@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyChanges, ChangeSetSchema, createInitialState, DomainError, globalKeys, RegionSchema, TransformSchema } from '../src/index.ts';
+import { applyChanges, changedSummary, ChangeSetSchema, createInitialState, DomainError, globalKeys, RegionSchema, TransformSchema } from '../src/index.ts';
 
 describe('领域事务', () => {
   it('以绝对值更新参数且保留未涉及字段', () => {
@@ -43,6 +43,12 @@ describe('领域事务', () => {
       regionDeletes: [],
     });
     expect(changes.globalAssignments).toHaveLength(11);
+  });
+
+  it('使用中文参数名称生成编辑摘要', () => {
+    const before = createInitialState('8c7955ce-5f1e-4c37-b927-9460e7791c30', 1600, 900);
+    const after = { ...before, global: { ...before.global, highlights: -12, shadows: 15, warmth: 4 } };
+    expect(changedSummary(before, after)).toBe('高光 0→-12，阴影 0→15，色温 0→4');
   });
 
   it('允许负 180 到正 180 度的自动裁切旋转角度', () => {
