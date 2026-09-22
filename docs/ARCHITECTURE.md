@@ -7,7 +7,7 @@
 AI 的输出进入校验器与候选区。应用建议后，确定性的状态 reducer 产生新状态，渲染器读取状态完成画面更新。
 
 ```text
-本地文件 → 解码与规范化 → 原始像素资源 → WebGL2 → 画布与 JPEG
+本地文件 → 解码与规范化 → 原始像素资源 → WebGL2 → 画布与多格式导出
                               ↑            ↑
                          坐标映射      已提交状态或候选状态
                                            ↑
@@ -26,14 +26,14 @@ AI 的输出进入校验器与候选区。应用建议后，确定性的状态 r
 | 样式 | CSS Modules、CSS 变量、原生语义控件 | 控制中性色彩和布局,减少无关组件框架依赖。滚动条自定义为 4px 细线 + 主题色 (`--border-strong` + `--text-faint` hover),track 透明,避免默认 12px 灰条与暗色界面对比突兀 |
 | 状态 | Zustand 加纯 reducer | React 订阅界面状态，事务逻辑独立于视图 |
 | 图形 | 原生 WebGL2、GLSL ES 3.00 | 自有参数需要固定像素语义，单张图片管线较短 |
-| 解码编码 | createImageBitmap、Canvas 2D、Blob | 使用浏览器真实解码与 JPEG 编码能力 |
+| 解码编码 | createImageBitmap、Canvas 2D、LibRaw WASM、UTIF、Blob | 解码常见图片、TIFF 和相机 RAW，并导出 JPEG、PNG、WebP、AVIF 或 TIFF |
 | 请求与校验 | fetch、AbortController、Zod | 同一套领域 Schema 供浏览器与网关校验 |
 | 服务端 | Node.js 24 LTS、Fastify | 同源静态文件与少量 API，便于本地及单实例托管 |
 | 模型 SDK | OpenAI 官方 JavaScript SDK（Responses API）、`@anthropic-ai/sdk`（Messages API） | 通过 `AI_SDK` 选择；OpenAI 路径用 `text.format.type: 'json_object'`，Anthropic 路径强制调用 `submit_edit_plan` 工具并以 `input_schema` 约束输入 |
 | 初始模型 | OpenAI 路径默认 `gpt-4o-mini`，Anthropic 路径由 `AI_MODEL` 显式指定 | 模型 ID 必须与所选 SDK 能力匹配 |
 | 依赖管理 | pnpm workspace | 两个应用和三个内聚包共享类型 |
 | 验证 | Vitest、Playwright、真实桌面浏览器 | 领域不变量、网络契约和实际渲染分别验证 |
-| 持久化 | 首版无编辑持久化,网关采用进程内匿名会话与计数器 | 单实例开放试用,后续扩容再引入持久共享存储 |
+| 持久化 | 首版无编辑持久化；Vercel 使用进程内匿名会话与计数器，Cloudflare 使用 Durable Object | 刷新后需要重新导入；Vercel 多实例公开试用前需增加持久化配额 |
 
 [React 官方版本页](https://react.dev/versions) 在资料核验时列出 19.3。[Vite 官方指南](https://vite.dev/guide/) 给出运行时最低要求，Node.js 24 LTS 满足该要求。[Node.js 发布页](https://nodejs.org/en/about/previous-releases) 用于开发启动时再次确认支持周期。其余依赖在 G0 选择当时兼容的稳定版本并固定到 lockfile，记录精确版本，禁止依赖未固定的 latest 部署。
 
@@ -90,7 +90,7 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 ### 多图会话
 
-`apps/web/src/state/editor.ts` 用 `ImageSlot[]` 跟踪当前会话的所有图片，每张图持有独立的 `EditState`、`history`、`future` 与缩略图（base64 data URL）。`activeIndex` 指向当前画布绑定的图片；commit / undo / redo / reset / candidate 操作只作用于 activeIndex 对应的那张。首次版本不跨图片同步状态；切换图片时 dispose 旧 PhotoRenderer 并 load 新 Blob，闪烁是已知可优化项。
+`apps/web/src/state/editor.ts` 用 `ImageSlot[]` 跟踪当前会话的所有图片，每张图持有独立的 `EditState`、`history`、`future` 与缩略图（base64 data URL）。`activeIndex` 指向当前画布绑定的图片；commit / undo / redo / reset / candidate 操作只作用于 activeIndex 对应的那张。首次版本不跨图片同步状态；切换时先加载目标图片再更新画布比例，避免出现明显闪烁。
 
 ## 模块公开契约
 
@@ -103,7 +103,7 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 | buildAnalysisImages | 资源、已提交状态 | 原图与当前效果 JPEG Blob，固定原图坐标 |
 | planWithRepair | provider、调用输入、当前状态、allowComposition | 可预览计划或最后一次错误；解析或校验失败时按 SPEC 允许一次修复调用 |
 | createProvider | provider kind（openai \| anthropic）、密钥、端点、模型 | 实现统一 Provider 接口的实例 |
-| exportImage | 资源、冻结状态、尺寸与质量、取消信号 | JPEG Blob 与输出元数据 |
+| exportImage | 资源、冻结状态、尺寸、格式与取消信号 | JPEG、PNG、WebP、AVIF 或 TIFF Blob 与输出元数据 |
 | useEditor | 无 | Zustand store 钩子，导出 `images`、`activeIndex`、`candidate` 以及 `addImage` / `setActiveIndex` / `removeImage` / `commit` / `undo` / `redo` / `setCandidate` / `reset` |
 
 所有异步任务携带 imageId 和 generation。替换图片时增加 generation，旧任务完成时检查后丢弃资源和结果。renderPreview 每个动画帧取最新状态，避免为每次滑杆事件排队。
@@ -121,13 +121,13 @@ web 依赖三个包，负责用户交互和浏览器资源生命周期。gateway
 
 ## 部署设计
 
-本地开发使用 Vite，代理同源 API 到 Fastify。生产环境使用一个 Node 进程提供 Vite 构建产物及 API，前方配置 HTTPS 反向代理。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
+本地开发使用 Vite，代理同源 API 到 Fastify。Vercel 部署 Vite 构建产物和 Node.js Fastify 网关函数；Cloudflare 部署静态资源和原生 Worker 后端。静态资源使用内容指纹缓存，HTML 与 API 使用适当的非缓存策略。API 响应统一设置 no-store。
 
-服务端必需配置 `AI_SDK`、`AI_API_KEY`、`AI_MODEL`、`ALLOWED_ORIGIN` 和 `DAILY_AI_ATTEMPT_LIMIT`。`AI_BASE_URL` 留空时使用所选 SDK 的官方地址。`SESSION_SECRET` 用于签名会话 cookie。`AI_SDK` 默认 `openai`。每个匿名会话每天最多 30 次上游尝试,全局每天最多 300 次。
+服务端必需配置 `AI_API_KEY` 与 `SESSION_SECRET`。`AI_SDK` 默认 `openai`；`AI_BASE_URL` 留空时使用所选 SDK 的官方地址；`AI_MODEL`、`ALLOWED_ORIGIN` 与配额变量可按部署需要覆盖。每个匿名会话每天默认最多 30 次上游尝试，全局默认每天最多 300 次。
 
 会话标识只存在服务端与 HttpOnly Cookie 通道。首版无邀请码门槛:任何同源请求都自动签发 24 小时匿名会话,会话内按上述速率限制计数。进程内计数重启会清零,首版通过单实例运行和供应商项目消费上限控制预算。公开开放或多实例部署前必须实现持久配额存储,该项是架构扩展门槛。
 
-部署目标为普通 Node 容器环境。首版所需服务为静态文件、同源 API 和上游模型接口。
+部署目标为 Vercel 或 Cloudflare，也可在本地 Node.js 环境运行网关。首版所需服务为静态文件、同源 API 和上游模型接口。
 
 ## 开发约定
 

@@ -1,22 +1,30 @@
-# MVP 实现记录
+# MVP 实现与验证记录
+
+更新日期：2026-09-22。
 
 ## 已实现范围
 
-| 需求 | 实现位置 | 当前验证 |
-| --- | --- | --- |
-| FR-01 | apps/web/src/app/App.tsx | 真实 JPEG 与 PNG 选择、尺寸限制、浏览器解码和白底规范化已完成 |
-| FR-02 至 FR-04 | apps/web/src/app/App.tsx 与 packages/renderer/src/index.ts | WebGL2 画布、缩放、全局参数、调平和裁切字段已完成 |
-| FR-05 至 FR-08 | apps/gateway/src/index.ts 与 apps/web/src/app/App.tsx | 匿名会话、严格模型计划、候选预览和解释卡已完成 |
-| FR-07 | apps/web/src/app/App.tsx 与 packages/renderer/src/index.ts | 四个柔和椭圆区域与局部参数已完成 |
-| FR-09 至 FR-10 | apps/web/src/app/App.tsx | 撤销、重做、重置状态逻辑和浏览器 JPEG 导出已完成 |
-| FR-11 至 FR-12 | apps/web/src/app/App.tsx 与 apps/gateway/src/index.ts | AbortController、过期关联检查、配额端点、发送说明和键盘撤销已完成 |
+| 需求 | 当前实现 |
+| --- | --- |
+| FR-01 | 多图选择、拖入与缩略图切换；支持 JPEG、PNG、WebP、AVIF、GIF、TIFF 和相机 RAW。本地解码后进入独立编辑会话。 |
+| FR-02 至 FR-04 | WebGL2 画布、缩放、平移、11 项全局参数、固定比例裁切与 -180° 至 180° 自动裁切旋转。 |
+| FR-05 至 FR-08 | OpenAI 与 Anthropic SDK 路径、匿名会话、配额、候选预览、应用或放弃、自然语言追问、参考图调色和建议解释。 |
+| FR-07 | 最多 4 个椭圆、线性渐变或画笔蒙版，支持局部曝光、高光和饱和度。 |
+| FR-09 | 撤销、重做、重置、拖动事务合并与同构图前后对比。 |
+| FR-10 | 浏览器内 JPEG、PNG、WebP、AVIF 和 TIFF 导出。 |
+| FR-11 至 FR-12 | AbortController、过期结果丢弃、错误提示与请求编号、键盘操作、发送说明、Vercel 和 Cloudflare 的同源 API 与配额限制。 |
 
-## 本次验证
+## 已完成验证
 
-2026-09-20 已通过 pnpm typecheck、pnpm test 和 pnpm build。
+- 2026-09-22：`pnpm test` 通过，当前领域测试共 7 项。
+- 2026-09-22：`pnpm build:deploy` 通过，包含 Vercel 网关类型检查和 Web 生产构建。
+- 2026-09-22：`pnpm exec wrangler deploy --dry-run` 通过，Cloudflare Worker 与静态资源可完成部署预检。
+- 本地真实浏览器已检查空状态、图片导入、WebGL2 画布、参数输入、撤销与工作区界面加载。
+- Vercel 已收到真实 MiniMax 模型响应。运行日志已记录模型输出、耗时、Token 用量和结构校验错误，后续修复以这些真实日志为依据。
 
-真实浏览器已完成空状态、PNG 导入、WebGL2 画布渲染、参数输入和撤销状态检查。网关以 Node 直接启动后，GET /api/session 返回未认证状态，POST /api/session 返回 204 与 HttpOnly 会话 Cookie。
+## 待验证项
 
-## 受阻验证
-
-真实模型计划调用等待配置 OPENAI_API_KEY。真实照片集、GPU 性能、2400 万像素导出和 AI 质量评测等待具备授权的样本与模型额度后执行。
+- 重新部署最新超时与模型格式兼容修复后，验证真实 AI 建议可完成候选预览和应用。
+- 60 张真实照片的 AI 质量评测、成本统计与局部指令正确率。
+- 2400 万像素导入和导出、两种 GPU、Chrome 与 Edge 的性能和一致性检查。
+- 15 位试用者的完成率、满意度与导出数据。

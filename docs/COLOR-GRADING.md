@@ -35,12 +35,12 @@
 | 对比度 | Contrast | Contrast | Contrast | **对比度** |
 | 高光区 | Highlights | HDR Highlight | Highlights | **高光** |
 | 阴影区 | Shadows | HDR Shadow | Shadows | **阴影** |
-| 白点 | Whites | HDR White | Gain | **白色色阶**(已有占位) |
-| 黑点 | Blacks | HDR Black | Lift | **黑色色阶**(已有占位) |
+| 白点 | Whites | HDR White | Gain | **白色色阶** |
+| 黑点 | Blacks | HDR Black | Lift | **黑色色阶** |
 | 清晰度 | Clarity / Texture / Dehaze | Clarity / Structure / Dehaze | Midtone Detail | **清晰度**(v1)/纹理(后续) |
 | 色温 | Temperature(K) | Temperature(K) | Temperature | **色温** |
 | 色调 | Tint | Tint | Tint | **色调** |
-| 自然饱和度 | Vibrance | (与 Saturation 合并) | Color Boost | **自然饱和度**(已有占位) |
+| 自然饱和度 | Vibrance | (与 Saturation 合并) | Color Boost | **自然饱和度** |
 | 饱和度 | Saturation | Saturation | Saturation | **饱和度** |
 | 分区染色 | Color Grading(3 色轮) | Color Balance(3 色轮) | Primaries(3 色轮) | **v2: 阴影/中间调/高光色轮** |
 | 颜色微调 | Color Mixer | Color Editor | Qualifier + Curves | **v2: HSL 颜色混合器(8 色 × 3)** |
@@ -92,7 +92,7 @@ Lightroom 的 Texture 是"中频细节",对皮肤毛孔/织物有用。C1 的 St
 - 优点:能做出"青蓝阴影 + 暖色高光"的电影感。
 - 缺点:是 wheel UI 不是滑杆,设计/渲染统一要花精力;v1 还要先扩展 SPEC schema 与 ai-contract schema。
 
-**结论**:v2 引入,放在"色彩"区段下;v1 用占位控件,等 SPEC 落地后再启用。
+**结论**:v2 引入,放在"色彩"区段下；当前版本不展示无功能的占位控件。
 
 ### 3.5 暂时不引入 HSL 颜色混合器
 
@@ -100,7 +100,7 @@ HSL 8 色 × 3 滑杆 = 24 个滑杆,数量上不算多,但都是参数。
 - 优点:能精准微调"天空再蓝一点"、"树叶再绿一点"。
 - 缺点:与三段色轮概念上重叠(三段色轮影响分区亮度,HSL 影响色相/饱和度/明度)。如果两个都做,SPEC 就要扩字段。
 
-**结论**:v2 引入;v1 用占位控件。
+**结论**:v2 引入；当前版本不展示无功能的占位控件。
 
 ### 3.6 局部调整从椭圆扩展到径向
 
@@ -227,7 +227,7 @@ System prompt 中更新参数清单:
 2. **三段色轮**(Color Grading / Color Balance)。SPEC 增加 `grading: { shadows, midtones, highlights }` 每段 `{ hue: 0~360, saturation: 0~100 }`。AI prompt 也需要扩展支持。
 3. **HSL 颜色混合器**(8 色 × 3 滑杆)。SPEC 增加 `colorMix: { hue: { red: ..., orange: ..., ... } }` 等等。AI prompt 需要扩字段。
 4. **曲线**(Tone Curve)。YRGB 4 通道 + 控制点列表。这是最复杂的扩展。
-5. **纹理(Texture)**。v1 Clarity 已占位,真正实现后让 Clarity 与 Texture 区分。
+5. **纹理(Texture)**。当前已实现 Clarity；后续引入 Texture 时需明确与 Clarity 的差异。
 6. **白平衡取色器**(`WB Picker`)。三款工具都默认暴露,体验立竿见影。
 7. **缩放 / 构图 / 镜头校正**:在 `构图` 区段下加 Keystone 垂直/水平。
 
@@ -238,9 +238,7 @@ System prompt 中更新参数清单:
 - `packages/domain/src/index.ts` 中 `globalKeys` 与 `GlobalSchema` 是其他文档的事实地基。
 - `docs/PRD.md` 中"参数面板包含构图、光线、色彩、局部调整四组"目前已有,但 4 组内的具体滑杆未列出。本文档的 §4.1 是首个明确清单。
 - `docs/ARCHITECTURE.md` 中 "SPEC 中 rendererVersion 为 pc-render-1 的算法定义项目数值语义" 与本文档一致;新增 4 个参数仍是 pc-render-1 范畴。
-- PRD 中"白色色阶、黑色色阶、自然饱和度、画笔、渐变、径向 当前未纳入 SPEC,以禁用占位控件展示" 的描述需要在 v1 实施时更新:
-  - 前 3 个(白色色阶 / 黑色色阶 / 自然饱和度)升级为真实控件,占位删除。
-  - 后 3 个(画笔 / 渐变 / 径向)仍为占位,等 v2。
+- 白色色阶、黑色色阶、自然饱和度、椭圆内外径向、线性渐变与画笔蒙版均已落地为真实控件；产品页面不保留无功能的占位入口。
 
 ---
 
