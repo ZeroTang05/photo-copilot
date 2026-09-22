@@ -23,6 +23,8 @@ Photo Copilot 面向摄影爱好者，提供浏览器内的参数式修图。照
 | [VALIDATION](VALIDATION.md) | 真实样本、测试矩阵和质量评估 |
 | [CURRENT-STATUS](evidence/MVP-IMPLEMENTATION.md) | 当前实现、已验证项与待验证项 |
 | [去雾与降噪实现计划](DEHAZE-DENOISE-PLAN.md) | 浏览器算法、接入位置、任务顺序与验收标准 |
+| [SAM 3 调研](SAM3-MASK-RESEARCH.md) | 自由蒙版映射、浏览器运行证据与已选云端提供方 |
+| [SAM 3 接入实施文档](SAM3-INTEGRATION-SPEC.md) | Gradio 接口、像素蒙版、LLM 区域输入与完整开发任务 |
 
 ## 文档权威边界
 
