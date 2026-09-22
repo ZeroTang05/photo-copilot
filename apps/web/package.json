@@ -12,6 +12,7 @@
     "@photo-copilot/ai-contract": "workspace:*",
     "@photo-copilot/domain": "workspace:*",
     "@photo-copilot/renderer": "workspace:*",
+    "@techstark/opencv-js": "5.0.0-release.1",
     "@vitejs/plugin-react": "6.1.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
