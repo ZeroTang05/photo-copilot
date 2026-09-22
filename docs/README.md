@@ -22,6 +22,7 @@ Photo Copilot 面向摄影爱好者，提供浏览器内的参数式修图。照
 | [ROADMAP](ROADMAP.md) | 阶段依赖、开发任务和退出标准 |
 | [VALIDATION](VALIDATION.md) | 真实样本、测试矩阵和质量评估 |
 | [CURRENT-STATUS](evidence/MVP-IMPLEMENTATION.md) | 当前实现、已验证项与待验证项 |
+| [去雾与降噪实现计划](DEHAZE-DENOISE-PLAN.md) | 浏览器算法、接入位置、任务顺序与验收标准 |
 
 ## 文档权威边界
 
