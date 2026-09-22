@@ -3,7 +3,7 @@ import Fastify from 'fastify';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { PlanRequestSchema, PlanResponseSchema } from '@photo-copilot/ai-contract';
 import { validatePlan } from '@photo-copilot/domain';
-import { createProvider, resolveProviderKind } from './providers/index.js';
+import { createProvider, errorLogDetails, resolveProviderKind } from './providers/index.js';
 import { planWithRepair } from './planner.js';
 
 const config = {
@@ -119,13 +119,45 @@ app.delete('/api/session', async (request, reply) => {
   return reply.code(204).send();
 });
 app.post('/api/plan', async (request, reply) => {
-  if(!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
+  if(!sameOrigin(request)) {
+    request.log.warn({ event: 'ai.plan.origin_denied', origin: request.headers.origin }, 'AI plan request denied by origin policy');
+    return reply.code(403).send(apiError('ORIGIN_DENIED','当前来源无法使用服务'));
+  }
   const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
-  if(!config.apiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
-  let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); if (parsed.referencePreview) jpegSize(parsed.referencePreview.base64); } catch { return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议')); }
-  const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) return reply.code(409).send(apiError('REQUEST_DUPLICATE','操作已提交'));
-  resetCounters(); if(session.attempts>=config.perSessionLimit || globalAttempts>=config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400)); session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
+  if(!config.apiKey) {
+    request.log.error({ event: 'ai.plan.configuration_missing', missing: 'AI_API_KEY' }, 'AI plan request cannot run without credentials');
+    return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
+  }
+  let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); if (parsed.referencePreview) jpegSize(parsed.referencePreview.base64); } catch (error) {
+    request.log.warn({ event: 'ai.plan.request_invalid', error: errorLogDetails(error) }, 'AI plan request rejected');
+    return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议'));
+  }
+  const { session }=active; if(session.day!==utcDay()){session.day=utcDay();session.attempts=0;} const duplicate=session.requestIds.get(parsed.requestId); if(duplicate && Date.now()-duplicate<REQ_DEDUP_WINDOW_MS) {
+    request.log.warn({ event: 'ai.plan.duplicate', requestId: parsed.requestId }, 'Duplicate AI plan request rejected');
+    return reply.code(409).send({ ...apiError('REQUEST_DUPLICATE','操作已提交'), requestId: parsed.requestId });
+  }
+  resetCounters(); if(session.attempts>=config.perSessionLimit || globalAttempts>=config.limit) {
+    request.log.warn({ event: 'ai.plan.quota_exhausted', requestId: parsed.requestId, sessionAttempts: session.attempts, globalAttempts }, 'AI plan request rejected by quota');
+    return reply.code(429).send({ ...apiError('QUOTA_EXHAUSTED','今日 AI 额度已用完',86400), requestId: parsed.requestId });
+  }
+  session.requestIds.set(parsed.requestId,Date.now()); session.attempts++; globalAttempts++;
   const started=Date.now();
+  request.log.info({
+    event: 'ai.plan.started',
+    requestId: parsed.requestId,
+    imageId: parsed.imageId,
+    baseRevision: parsed.baseRevision,
+    mode: parsed.mode,
+    provider: config.provider,
+    model: config.model,
+    allowComposition: parsed.allowComposition,
+    hasReferenceImage: Boolean(parsed.referencePreview),
+    previewDimensions: {
+      original: [parsed.originalPreview.width, parsed.originalPreview.height],
+      current: [parsed.currentPreview.width, parsed.currentPreview.height],
+      ...(parsed.referencePreview ? { reference: [parsed.referencePreview.width, parsed.referencePreview.height] } : {}),
+    },
+  }, 'AI plan request started');
   try {
     const { payload, result } = await planWithRepair(
       provider,
@@ -134,7 +166,7 @@ app.post('/api/plan', async (request, reply) => {
         userText: JSON.stringify({ ...parsed, originalPreview: { ...parsed.originalPreview, base64: 'omitted' }, currentPreview: { ...parsed.currentPreview, base64: 'omitted' }, ...(parsed.referencePreview ? { referencePreview: { ...parsed.referencePreview, base64: 'omitted' } } : {}) }),
         images: [{ base64: parsed.originalPreview.base64 }, { base64: parsed.currentPreview.base64 }, ...(parsed.referencePreview ? [{ base64: parsed.referencePreview.base64 }] : [])],
       },
-      { state: parsed.state, allowComposition: parsed.allowComposition, log: request.log },
+      { state: parsed.state, allowComposition: parsed.allowComposition, log: request.log, requestId: parsed.requestId },
     );
     const response = PlanResponseSchema.parse({
       requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision,
@@ -142,9 +174,30 @@ app.post('/api/plan', async (request, reply) => {
       payload,
       usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cachedInputTokens: result.usage.cachedInputTokens, attempts: 1, durationMs: Date.now() - started },
     });
+    request.log.info({
+      event: 'ai.plan.completed',
+      requestId: parsed.requestId,
+      imageId: parsed.imageId,
+      provider: config.provider,
+      model: result.model,
+      durationMs: Date.now() - started,
+      usage: result.usage,
+      planOutput: payload,
+    }, 'AI plan request completed');
     return reply.header('cache-control', 'no-store').send(response);
   } catch (error) {
-    request.log.warn({ err: error instanceof Error ? error.message : 'unknown', requestId: parsed.requestId }, 'planner failed');
-    return reply.code(502).send(apiError('PROVIDER_ERROR', '模型服务暂时不可用，可稍后重新请求'));
+    request.log.error({
+      event: 'ai.plan.failed',
+      requestId: parsed.requestId,
+      imageId: parsed.imageId,
+      provider: config.provider,
+      model: config.model,
+      durationMs: Date.now() - started,
+      error: errorLogDetails(error),
+    }, 'AI plan request failed');
+    return reply.code(502).send({
+      ...apiError('PROVIDER_ERROR', '模型服务暂时不可用，可稍后重新请求'),
+      requestId: parsed.requestId,
+    });
   }
 });

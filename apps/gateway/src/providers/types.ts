@@ -46,6 +46,28 @@ export class ProviderError extends Error {
   }
 }
 
+/** 将 SDK 错误压缩为可安全写入运行时日志的字段，避免输出请求头和密钥。 */
+export function errorLogDetails(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { message: String(error) };
+  const details: Record<string, unknown> = {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+  };
+  const source = error.cause instanceof Error ? error.cause : error;
+  if (source instanceof Error) {
+    details.cause = { name: source.name, message: source.message, stack: source.stack };
+  }
+  if (typeof source === 'object' && source !== null) {
+    const record = source as unknown as Record<string, unknown>;
+    for (const key of ['status', 'code', 'type', 'request_id', 'requestId', 'requestID']) {
+      const value = record[key];
+      if (typeof value === 'string' || typeof value === 'number') details[key] = value;
+    }
+  }
+  return details;
+}
+
 export interface PlannerSuccess {
   payload: PlanPayload;
   result: ProviderCallResult;

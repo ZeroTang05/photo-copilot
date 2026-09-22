@@ -460,7 +460,10 @@ export function App() {
       };
       const response = await fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: signal.signal });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.message ?? '建议请求失败');
+      if (!response.ok) {
+        const requestMarker = typeof body.requestId === 'string' ? `（请求编号：${body.requestId}）` : '';
+        throw new Error(`${body.message ?? '建议请求失败'}${requestMarker}`);
+      }
       if (state.imageId !== body.imageId || state.revision !== body.baseRevision) throw new Error('建议已过期');
       const planPayload = body.payload as PlanPayload;
       if (planPayload.status !== 'plan') { setStatus(planPayload.message || '本次没有可应用的建议'); return; }

@@ -16,4 +16,4 @@ export function resolveProviderKind(raw: string | undefined): ProviderKind {
 }
 
 export type { Provider, ProviderConfig, ProviderCallInput, ProviderCallResult, ProviderKind, PlannerSuccess } from './types.js';
-export { ProviderError } from './types.js';
+export { ProviderError, errorLogDetails } from './types.js';

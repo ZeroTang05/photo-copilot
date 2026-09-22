@@ -73,6 +73,15 @@ Cloudflare 原生 Worker 支持 OpenAI SDK 和 Anthropic SDK。部署页面只�
 
 完整步骤见 [部署说明](docs/DEPLOYMENT.md)。
 
+## 排查 AI 调用
+
+每次 AI 调色请求都会写入部署平台的运行日志。出现“模型服务暂时不可用”时，先从前端错误提示中的 `requestId` 开始查找；它能把一次请求的开始、模型输出、自动修复、成功或失败记录串在一起。
+
+- Vercel：进入项目的 **Logs**，搜索 `requestId` 或 `ai.plan.failed`。
+- Cloudflare：进入 Worker 的 **Logs**，搜索 `requestId` 或 `ai.provider.failed`。
+
+日志会保留模型返回的 JSON、HTTP 状态、耗时和用量信息；不会记录 API Key、Cookie 或上传图片的 base64 内容。
+
 ## 参与贡献
 
 欢迎提交功能建议、问题报告和 Pull Request。提交前请阅读 [贡献指南](CONTRIBUTING.md)。

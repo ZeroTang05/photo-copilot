@@ -1,13 +1,18 @@
 import type { EditState, PlanPayload } from '@photo-copilot/domain';
 import { PlanPayloadSchema, validatePlan } from '@photo-copilot/domain';
-import type { Provider, ProviderCallInput, ProviderCallResult, PlannerSuccess } from './providers/index.js';
+import { errorLogDetails, type Provider, type ProviderCallInput, type ProviderCallResult, type PlannerSuccess } from './providers/index.js';
 
 const stripMarkdownFences = (s: string) => s.replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '').trim();
 
 interface PlannerOptions {
   state: EditState;
   allowComposition: boolean;
-  log: { warn: (payload: Record<string, unknown>, msg: string) => void };
+  log: {
+    info: (payload: Record<string, unknown>, msg: string) => void;
+    warn: (payload: Record<string, unknown>, msg: string) => void;
+    error: (payload: Record<string, unknown>, msg: string) => void;
+  };
+  requestId: string;
 }
 
 const errorMessage = (err: unknown) => err instanceof Error ? err.message : 'unknown';
@@ -74,10 +79,36 @@ export async function planWithRepair(
   input: ProviderCallInput,
   options: PlannerOptions,
 ): Promise<PlannerSuccess> {
-  let result = await provider.call(input);
   let lastError: unknown;
+  let callInput = input;
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    const startedAt = Date.now();
+    let result: ProviderCallResult;
+    try {
+      result = await provider.call(callInput);
+    } catch (err) {
+      options.log.error({
+        event: 'ai.provider.failed',
+        requestId: options.requestId,
+        provider: provider.name,
+        attempt: attempt + 1,
+        durationMs: Date.now() - startedAt,
+        error: errorLogDetails(err),
+      }, 'AI provider call failed');
+      throw err;
+    }
+    // 模型输出是调色 JSON，不包含图片数据；完整记录便于重现契约或解析失败。
+    options.log.info({
+      event: 'ai.provider.response',
+      requestId: options.requestId,
+      provider: provider.name,
+      attempt: attempt + 1,
+      model: result.model,
+      durationMs: Date.now() - startedAt,
+      usage: result.usage,
+      modelOutput: result.rawText,
+    }, 'AI provider returned a response');
     try {
       const payload = removeUnauthorizedComposition(parseResult(result), options.allowComposition);
       validatePlan(options.state, payload, options.allowComposition);
@@ -85,13 +116,16 @@ export async function planWithRepair(
     } catch (err) {
       lastError = err;
       options.log.warn({
-        err: errorMessage(err),
+        event: 'ai.plan.attempt_failed',
+        requestId: options.requestId,
         provider: provider.name,
-        attempt,
-        snippet: result.rawText.slice(0, 200),
+        attempt: attempt + 1,
+        durationMs: Date.now() - startedAt,
+        error: errorLogDetails(err),
+        modelOutput: result.rawText,
       }, 'planner attempt failed');
       if (attempt === 1) break;
-      result = await provider.call({ ...input, userText: buildRepairText(input.userText, err) });
+      callInput = { ...input, userText: buildRepairText(input.userText, err) };
     }
   }
 
