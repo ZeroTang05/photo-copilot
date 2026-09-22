@@ -2,6 +2,9 @@ import type { PlanPayload } from '@photo-copilot/domain';
 
 export type ProviderKind = 'openai' | 'anthropic';
 
+/** 给 Vercel 函数保留返回错误或修复计划的时间余量。 */
+export const PROVIDER_TIMEOUT_MS = 75_000;
+
 export interface ProviderConfig {
   apiKey: string;
   baseURL?: string;
@@ -34,7 +37,7 @@ export interface ProviderCallResult {
 
 export interface Provider {
   readonly name: ProviderKind;
-  call(input: ProviderCallInput): Promise<ProviderCallResult>;
+  call(input: ProviderCallInput, timeoutMs?: number): Promise<ProviderCallResult>;
 }
 
 // Shared exception for any upstream/model failure. The planner wraps everything
@@ -71,4 +74,5 @@ export function errorLogDetails(error: unknown): Record<string, unknown> {
 export interface PlannerSuccess {
   payload: PlanPayload;
   result: ProviderCallResult;
+  attempts: number;
 }

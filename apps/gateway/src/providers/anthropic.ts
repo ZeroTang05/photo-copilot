@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { planPayloadJsonSchema } from '@photo-copilot/ai-contract';
 import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types.js';
-import { ProviderError } from './types.js';
+import { ProviderError, PROVIDER_TIMEOUT_MS } from './types.js';
 
 // Anthropic Messages API provider.
 //
@@ -30,11 +30,11 @@ export class AnthropicMessagesProvider implements Provider {
       apiKey: cfg.apiKey,
       ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
       maxRetries: 0,
-      timeout: 30000,
+      timeout: PROVIDER_TIMEOUT_MS,
     });
   }
 
-  async call(input: ProviderCallInput): Promise<ProviderCallResult> {
+  async call(input: ProviderCallInput, timeoutMs = PROVIDER_TIMEOUT_MS): Promise<ProviderCallResult> {
     let response;
     try {
       response = await this.client.messages.create({
@@ -61,7 +61,7 @@ export class AnthropicMessagesProvider implements Provider {
             })),
           ],
         }],
-      });
+      }, { timeout: timeoutMs });
     } catch (error) {
       throw new ProviderError('anthropic request failed', error);
     }

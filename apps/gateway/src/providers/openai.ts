@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import type { Provider, ProviderCallInput, ProviderCallResult, ProviderConfig, ProviderKind } from './types.js';
-import { ProviderError } from './types.js';
+import { ProviderError, PROVIDER_TIMEOUT_MS } from './types.js';
 
 // OpenAI Responses API provider.
 //
@@ -23,11 +23,11 @@ export class OpenAIResponsesProvider implements Provider {
       apiKey: cfg.apiKey,
       ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
       maxRetries: 0,
-      timeout: 30000,
+      timeout: PROVIDER_TIMEOUT_MS,
     });
   }
 
-  async call(input: ProviderCallInput): Promise<ProviderCallResult> {
+  async call(input: ProviderCallInput, timeoutMs = PROVIDER_TIMEOUT_MS): Promise<ProviderCallResult> {
     let response;
     try {
       response = await this.client.responses.create({
@@ -47,7 +47,7 @@ export class OpenAIResponsesProvider implements Provider {
           ],
         }],
         text: { format: { type: 'json_object' } },
-      });
+      }, { timeout: timeoutMs });
     } catch (error) {
       throw new ProviderError('openai request failed', error);
     }

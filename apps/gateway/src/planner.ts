@@ -1,6 +1,6 @@
 import type { EditState, PlanPayload } from '@photo-copilot/domain';
 import { PlanPayloadSchema, validatePlan } from '@photo-copilot/domain';
-import { errorLogDetails, type Provider, type ProviderCallInput, type ProviderCallResult, type PlannerSuccess } from './providers/index.js';
+import { errorLogDetails, PROVIDER_TIMEOUT_MS, ProviderError, type Provider, type ProviderCallInput, type ProviderCallResult, type PlannerSuccess } from './providers/index.js';
 
 const stripMarkdownFences = (s: string) => s.replace(/^```(?:json)?\s*\n/i, '').replace(/\n```\s*$/, '').trim();
 
@@ -13,22 +13,33 @@ interface PlannerOptions {
     error: (payload: Record<string, unknown>, msg: string) => void;
   };
   requestId: string;
+  /** 端到端截止时间，给路由层的响应序列化和日志预留余量。 */
+  deadlineAt: number;
 }
 
 const errorMessage = (err: unknown) => err instanceof Error ? err.message : 'unknown';
 
-// Defensive normalization: weaker models occasionally omit empty array
-// fields or smuggle them in as JSON-encoded strings. Coerce to [] before
-// Zod parse so missing/malformed arrays don't break the contract.
-const coerceArrayField = (value: unknown): unknown[] => {
+/**
+ * Anthropic 兼容接口偶尔把空数组序列化为 ""。该值没有业务含义，转换为 []。
+ * 其他错误类型保持原样，由 Zod 严格拒绝并触发一次模型修复。
+ */
+const normalizeEmptyArray = (value: unknown): unknown => {
   if (Array.isArray(value)) return value;
-  if (typeof value === 'string') {
+  if (value === '') return [];
+  if (typeof value === 'string' && value.trimStart().startsWith('[')) {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) return parsed;
-    } catch { /* fall through */ }
+    } catch { /* 交给结构校验报告原始格式错误。 */ }
   }
-  return [];
+  return value;
+};
+
+const normalizeRegion = (value: unknown): unknown => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const region = { ...(value as Record<string, unknown>) };
+  region.brushDabs = normalizeEmptyArray(region.brushDabs);
+  return region;
 };
 
 const normalizePayload = (raw: unknown): unknown => {
@@ -37,9 +48,10 @@ const normalizePayload = (raw: unknown): unknown => {
   const changes = obj.changes;
   if (changes && typeof changes === 'object' && !Array.isArray(changes)) {
     const c = { ...(changes as Record<string, unknown>) };
-    c.globalAssignments = coerceArrayField(c.globalAssignments);
-    c.regionUpserts = coerceArrayField(c.regionUpserts);
-    c.regionDeletes = coerceArrayField(c.regionDeletes);
+    c.globalAssignments = normalizeEmptyArray(c.globalAssignments);
+    c.regionUpserts = normalizeEmptyArray(c.regionUpserts);
+    c.regionDeletes = normalizeEmptyArray(c.regionDeletes);
+    if (Array.isArray(c.regionUpserts)) c.regionUpserts = c.regionUpserts.map(normalizeRegion);
     obj.changes = c;
   }
   return obj;
@@ -69,8 +81,10 @@ const removeUnauthorizedComposition = (payload: PlanPayload, allowComposition: b
   };
 };
 
-const buildRepairText = (userText: string, error: unknown): string =>
-  `${userText}\n\n[修复请求] 你之前的提交未通过校验,错误信息:\n${errorMessage(error)}\n请重新调用 submit_edit_plan 工具,严格匹配 input_schema。`;
+const buildRepairText = (userText: string, previousOutput: string, error: unknown): string =>
+  `${userText}\n\n[修复请求] 你之前的提交未通过校验。请只修正以下工具参数中指出的问题，保留其他有效内容。\n[上次工具参数]\n${previousOutput}\n[校验错误]\n${errorMessage(error)}\n请重新调用 submit_edit_plan 工具，严格匹配 input_schema。`;
+
+const addUsage = (left: number | null, right: number | null) => left === null && right === null ? null : (left ?? 0) + (right ?? 0);
 
 // One bounded repair attempt, per docs/AI-WORKFLOW.md:
 // "业务规则失败允许一次修复调用,输入原计划和具名错误,不额外生成新图片。"
@@ -81,12 +95,20 @@ export async function planWithRepair(
 ): Promise<PlannerSuccess> {
   let lastError: unknown;
   let callInput = input;
+  let usage: ProviderCallResult['usage'] = { inputTokens: null, outputTokens: null, cachedInputTokens: null };
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const startedAt = Date.now();
     let result: ProviderCallResult;
     try {
-      result = await provider.call(callInput);
+      const timeoutMs = Math.min(PROVIDER_TIMEOUT_MS, options.deadlineAt - Date.now());
+      if (timeoutMs < 1_000) throw new ProviderError('AI 请求已超出总时限');
+      result = await provider.call(callInput, timeoutMs);
+      usage = {
+        inputTokens: addUsage(usage.inputTokens, result.usage.inputTokens),
+        outputTokens: addUsage(usage.outputTokens, result.usage.outputTokens),
+        cachedInputTokens: addUsage(usage.cachedInputTokens, result.usage.cachedInputTokens),
+      };
     } catch (err) {
       options.log.error({
         event: 'ai.provider.failed',
@@ -112,7 +134,7 @@ export async function planWithRepair(
     try {
       const payload = removeUnauthorizedComposition(parseResult(result), options.allowComposition);
       validatePlan(options.state, payload, options.allowComposition);
-      return { payload, result };
+      return { payload, result: { ...result, usage }, attempts: attempt + 1 };
     } catch (err) {
       lastError = err;
       options.log.warn({
@@ -125,7 +147,7 @@ export async function planWithRepair(
         modelOutput: result.rawText,
       }, 'planner attempt failed');
       if (attempt === 1) break;
-      callInput = { ...input, userText: buildRepairText(input.userText, err) };
+      callInput = { ...input, userText: buildRepairText(input.userText, result.rawText, err) };
     }
   }
 

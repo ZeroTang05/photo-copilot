@@ -115,7 +115,7 @@ export function App() {
 
   const state = currentSlot?.state;
 
-  const [status, setStatus] = useState('导入一张 JPEG 或 PNG 开始编辑');
+  const [status, setStatus] = useState('导入一张图片开始编辑');
   const [instruction, setInstruction] = useState('');
   const [referencePhoto, setReferencePhoto] = useState<ReferencePhoto>();
   const [allowComposition, setAllowComposition] = useState(false);
