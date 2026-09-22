@@ -10,6 +10,10 @@ interface CopilotPanelProps {
   busy: boolean;
   onAuto: () => void;
   onFollowup: () => void;
+  onSegment: () => void;
+  pointSegmentationSupported: boolean;
+  pointSelectionActive: boolean;
+  onTogglePointSelection: () => void;
   onCancel: () => void;
   onClose: () => void;
   thumbnail?: string;
@@ -19,6 +23,8 @@ interface CopilotPanelProps {
   referencePhoto?: { name: string; thumbnail: string };
   onReferenceImport: (file: File) => void;
   onRemoveReference: () => void;
+  samCandidates: Array<{ candidateId: string; displayLabel: string; areaRatio: number }>;
+  onApplySamCandidate: (candidateId: string) => void;
 }
 
 const IconClose = () => (
@@ -100,8 +106,16 @@ export function CopilotPanel(props: CopilotPanelProps) {
             <div className="spacer" />
             <button className="discard" disabled={!props.busy} onClick={props.onCancel}>取消</button>
             <button className="ghost" disabled={!props.hasState || props.busy} onClick={props.onAuto}>分析并建议</button>
+            <button className="ghost" disabled={!props.hasState || props.busy || !props.instruction.trim()} onClick={props.onSegment}>AI 局部调整</button>
+            {props.pointSegmentationSupported && <button className={`ghost ${props.pointSelectionActive ? 'active-tool' : ''}`} disabled={!props.hasState || props.busy} onClick={props.onTogglePointSelection}>{props.pointSelectionActive ? '结束点选' : '点选物体'}</button>}
             <button className="primary" disabled={!props.hasState || props.busy || !props.instruction.trim()} onClick={props.onFollowup}>应用</button>
           </div>
+          {props.samCandidates.length > 0 && <div className="sam-candidates" aria-label="SAM3 选区候选">
+            <strong>识别到的选区</strong>
+            {props.samCandidates.map((candidate) => <button key={candidate.candidateId} className="ghost" disabled={props.busy} onClick={() => props.onApplySamCandidate(candidate.candidateId)}>
+              加入：{candidate.displayLabel}（覆盖 {Math.round(candidate.areaRatio * 100)}%）
+            </button>)}
+          </div>}
         </div>
       </div>
     </section>

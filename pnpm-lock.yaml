@@ -17,6 +17,9 @@ importers:
 
   apps/cloudflare:
     dependencies:
+      '@gradio/client':
+        specifier: 2.7.0
+        version: 2.7.0
       zod:
         specifier: 4.1.5
         version: 4.1.5
@@ -29,6 +32,9 @@ importers:
       '@fastify/cookie':
         specifier: 11.0.2
         version: 11.0.2
+      '@gradio/client':
+        specifier: 2.7.0
+        version: 2.7.0
       '@photo-copilot/ai-contract':
         specifier: workspace:*
         version: link:../../packages/ai-contract
@@ -468,6 +474,10 @@ packages:
   '@fastify/proxy-addr@5.1.1':
     resolution: {integrity: sha512-zv07Y9GEuDsJPegZoDFd4SDWaZOW8N2pa0GSrYmKpId/tjt1Hgo3BjZBVjdVpfVrHaA+Qv5jawtS2O50J5xM9g==}
 
+  '@gradio/client@2.7.0':
+    resolution: {integrity: sha512-nH0mi4gcS9YBgDMGKLLwDEUqAP9uapzC77t2LZ9JURTYn3UxWqgPwiKSHLuZ8/3hLWUtPTjlOmvU+VqT9Gtxtw==}
+    engines: {node: '>=18.0.0'}
+
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
 
@@ -901,6 +911,9 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
+
+  fetch-event-stream@0.1.6:
+    resolution: {integrity: sha512-GREtJ5HNikdU2AXtZ6E/5bk+aslMU6ie5mPG6H9nvsdDkkHQ6m5lHwmmmDTOBexok9hApQ7EprsXCdmz9ZC68w==}
 
   find-my-way@9.9.0:
     resolution: {integrity: sha512-sJsgZ1sQH2UDuowPuMKg8az7Qc8F0jnj+SKkFWU/+T0xcFlgV5skgXOGUqmQzOdmW6ALA7AhJINWx3qFBkbLHA==}
@@ -1555,6 +1568,10 @@ snapshots:
       '@fastify/forwarded': 3.0.2
       ipaddr.js: 2.5.0
 
+  '@gradio/client@2.7.0':
+    dependencies:
+      fetch-event-stream: 0.1.6
+
   '@jridgewell/sourcemap-codec@1.6.0': {}
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
@@ -1935,6 +1952,8 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
+
+  fetch-event-stream@0.1.6: {}
 
   find-my-way@9.9.0:
     dependencies:

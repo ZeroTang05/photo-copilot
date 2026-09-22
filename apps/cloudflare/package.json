@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@gradio/client": "2.7.0",
     "zod": "4.1.5"
   }
 }

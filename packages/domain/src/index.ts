@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-export const SCHEMA_VERSION = 2 as const;
-export const RENDERER_VERSION = 'pc-render-2' as const;
+export const SCHEMA_VERSION = 3 as const;
+export const RENDERER_VERSION = 'pc-render-3' as const;
 // 全局可调参数顺序与区间见 docs/COLOR-GRADING.md §4.1。
 // 新增顺序遵循"光-色分区命名",与 Lightroom / Capture One / DaVinci 三方共识对齐。
 export const globalKeys = [
@@ -57,18 +57,32 @@ export const TransformSchema = z.object({
   angleDeg: finite(-180, 180), crop: CropSchema, aspectLock: z.enum(['free', 'original', 'square', 'portrait4x5', 'landscape3x2', 'wide16x9']),
 }).strict();
 export const BrushDabSchema = z.object({ x: finite(0, 1), y: finite(0, 1) }).strict();
-export const RegionSchema = z.object({
-  id: z.uuid(), label: z.string().trim().min(1).max(40), enabled: z.boolean(), centerX: finite(0, 1), centerY: finite(0, 1),
-  radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1), mode: z.enum(['inside', 'outside']).default('inside'), adjustments: LocalAdjustmentsSchema,
-  // 三种局部蒙版共用同一组调整参数。线性渐变使用 angleDeg 和 feather，
-  // 画笔使用 brushDabs 与 brushRadius；椭圆继续使用两个半径。
-  shape: z.enum(['ellipse', 'linear', 'brush']).default('ellipse'),
-  angleDeg: finite(-180, 180).default(0),
-  brushRadius: finite(.01, .35).default(.06),
-  brushDabs: z.array(BrushDabSchema).max(32).default([]),
+/** 指向浏览器本地不可变像素蒙版的引用。像素不会写进编辑历史。 */
+export const MaskRefSchema = z.object({ assetId: z.uuid(), version: z.number().int().positive() }).strict();
+export type MaskRef = z.infer<typeof MaskRefSchema>;
+
+const RegionBaseSchema = z.object({
+  id: z.uuid(), label: z.string().trim().min(1).max(40), enabled: z.boolean(), mode: z.enum(['inside', 'outside']).default('inside'), adjustments: LocalAdjustmentsSchema,
 }).strict();
+const EllipseRegionSchema = RegionBaseSchema.extend({
+  shape: z.literal('ellipse'), centerX: finite(0, 1), centerY: finite(0, 1), radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1),
+  angleDeg: finite(-180, 180).default(0), brushRadius: finite(.01, .35).default(.06), brushDabs: z.array(BrushDabSchema).max(32).default([]),
+}).strict();
+const LinearRegionSchema = RegionBaseSchema.extend({
+  shape: z.literal('linear'), centerX: finite(0, 1), centerY: finite(0, 1), radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1),
+  angleDeg: finite(-180, 180).default(0), brushRadius: finite(.01, .35).default(.06), brushDabs: z.array(BrushDabSchema).max(32).default([]),
+}).strict();
+const BrushRegionSchema = RegionBaseSchema.extend({
+  shape: z.literal('brush'), centerX: finite(0, 1), centerY: finite(0, 1), radiusX: finite(.01, 1), radiusY: finite(.01, 1), feather: finite(.05, 1),
+  angleDeg: finite(-180, 180).default(0), brushRadius: finite(.01, .35).default(.06), brushDabs: z.array(BrushDabSchema).min(1).max(32),
+}).strict();
+/** raster 区域只保存蒙版引用，避免把虚构的椭圆参数混进数据。 */
+const RasterRegionSchema = RegionBaseSchema.extend({
+  shape: z.literal('raster'), maskRef: MaskRefSchema, featherRadius: finite(0, .02),
+}).strict();
+export const RegionSchema = z.discriminatedUnion('shape', [EllipseRegionSchema, LinearRegionSchema, BrushRegionSchema, RasterRegionSchema]);
 export const EditStateSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION), rendererVersion: z.literal(RENDERER_VERSION), imageId: z.uuid(), revision: z.number().int().nonnegative(),
+  schemaVersion: z.literal(SCHEMA_VERSION), rendererVersion: z.literal(RENDERER_VERSION), imageId: z.uuid(), sourceVersion: z.number().int().positive(), revision: z.number().int().nonnegative(),
   sourceWidth: z.number().int().positive(), sourceHeight: z.number().int().positive(), global: GlobalSchema, transform: TransformSchema,
   regions: z.array(RegionSchema).max(4),
 }).strict();
@@ -81,7 +95,7 @@ export const defaultGlobal = (): z.infer<typeof GlobalSchema> => ({
   dehaze: 0, denoiseLuma: 0, denoiseChroma: 0, warmth: 0, tint: 0, vibrance: 0, saturation: 0,
 });
 export const createInitialState = (imageId: string, width: number, height: number): EditState => EditStateSchema.parse({
-  schemaVersion: SCHEMA_VERSION, rendererVersion: RENDERER_VERSION, imageId, revision: 0, sourceWidth: width, sourceHeight: height,
+  schemaVersion: SCHEMA_VERSION, rendererVersion: RENDERER_VERSION, imageId, sourceVersion: 1, revision: 0, sourceWidth: width, sourceHeight: height,
   global: defaultGlobal(), transform: { angleDeg: 0, crop: { x: 0, y: 0, width: 1, height: 1 }, aspectLock: 'original' }, regions: [],
 });
 

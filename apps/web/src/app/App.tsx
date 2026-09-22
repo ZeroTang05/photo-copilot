@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import * as UTIF from 'utif2';
 import { applyChanges, changedSummary, createInitialState, defaultGlobal, SCHEMA_VERSION, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
-import type { PlanRequest } from '@photo-copilot/ai-contract';
+import type { PlanRequest, SegmentIntent, SegmentResponse } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
 import { TopBar, type ExportFormat } from './TopBar';
@@ -11,6 +11,7 @@ import { CopilotPanel } from './CopilotPanel';
 import { decodePhotoFile, isSupportedPhotoFile } from '../lib/image-import';
 import { restorationClient } from '../lib/restoration/client';
 import { hasRestoration, type RestorationMode, type RestorationParameters } from '../lib/restoration/types';
+import { alphaFromMaskPng, maskMetrics, MaskAssetStore } from '../lib/masks';
 
 function uid() { return crypto.randomUUID(); }
 
@@ -33,6 +34,19 @@ interface ReferencePhoto {
 interface DetailPreview {
   original: string;
   processed: string;
+}
+
+interface SamCandidate {
+  candidateId: string;
+  imageId: string;
+  sourceVersion: number;
+  query: string | null;
+  displayLabel: string;
+  maskRef: { assetId: string; version: number };
+  width: number;
+  height: number;
+  bbox: { x: number; y: number; width: number; height: number };
+  areaRatio: number;
 }
 
 // 旋转时取能完全填满当前画幅的最大内接矩形，避免边角复制或拉伸。
@@ -77,7 +91,7 @@ async function thumbnailFromBlob(blob: Blob, maxEdge = 240): Promise<string> {
   return canvas.toDataURL('image/jpeg', 0.8);
 }
 
-async function previewFromBlob(blob: Blob, maxEdge: number) {
+async function previewFromBlob(blob: Blob, maxEdge: number, quality = .85) {
   const bitmap = await createImageBitmap(blob);
   const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas');
@@ -86,7 +100,7 @@ async function previewFromBlob(blob: Blob, maxEdge: number) {
   canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   bitmap.close();
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((value) => value ? resolve(value) : reject(new Error('JPEG 编码失败')), 'image/jpeg', 0.85);
+    canvas.toBlob((value) => value ? resolve(value) : reject(new Error('JPEG 编码失败')), 'image/jpeg', quality);
   }).then((jpeg) => ({ blob: jpeg, width: canvas.width, height: canvas.height }));
 }
 
@@ -105,6 +119,7 @@ export function App() {
   const renderedImageIdRef = useRef<string | undefined>(undefined);
   const renderSizeRef = useRef<{ width: number; height: number } | undefined>(undefined);
   const restorationGenerationRef = useRef(0);
+  const maskStoreRef = useRef(new MaskAssetStore());
   const currentSlot = useEditor((state) => activeSlot(state));
   const images = useEditor((state) => state.images);
   const activeIndex = useEditor((state) => state.activeIndex);
@@ -131,15 +146,22 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [activeBrushRegionId, setActiveBrushRegionId] = useState<string>();
+  const [activeRasterPaint, setActiveRasterPaint] = useState<{ regionId: string; operation: 'add' | 'erase' }>();
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
   const [isComparing, setIsComparing] = useState(false);
   const [detailPreview, setDetailPreview] = useState<DetailPreview>();
+  const [samCandidates, setSamCandidates] = useState<SamCandidate[]>([]);
+  const [pointSegmentationSupported, setPointSegmentationSupported] = useState(false);
+  const [pointSelectionActive, setPointSelectionActive] = useState(false);
+  const [pointDraft, setPointDraft] = useState<Array<{ x: number; y: number; label: 0 | 1 }>>([]);
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const pointRevisionRef = useRef(0);
   const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
+  const rasterStrokeRef = useRef<{ regionId: string; operation: 'add' | 'erase'; points: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
   const dragDepthRef = useRef(0);
 
   /** 为 AI 与导出取得原尺寸修复图；零值直接解码原始规范化 Blob。 */
@@ -184,6 +206,7 @@ export function App() {
     const aspect = (renderState.sourceWidth * renderState.transform.crop.width) / (renderState.sourceHeight * renderState.transform.crop.height);
     const width = Math.min(availableWidth, availableHeight * aspect);
     renderSizeRef.current = { width, height: width / aspect };
+    for (const region of renderState.regions) if (region.shape === 'raster') rendererRef.current.setMask(region.maskRef, maskStoreRef.current.get(region.maskRef));
     rendererRef.current.render(renderState, width, width / aspect);
   }, [renderState]);
 
@@ -212,6 +235,12 @@ export function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [redo, undo]);
 
+  // 公开 Demo 当前没有点选蒙版接口。只有网关明确宣布可用时才展示点选入口。
+  useEffect(() => {
+    void fetch('/api/segment-capabilities').then(async (response) => response.ok ? response.json() as Promise<{ pointSegmentation?: boolean }> : { pointSegmentation: false })
+      .then((capabilities) => setPointSegmentationSupported(capabilities.pointSegmentation === true)).catch(() => setPointSegmentationSupported(false));
+  }, []);
+
   // 组件卸载时释放当前的 WebGL 资源；切换图片时由下方效果在新图就绪后替换它。
   useEffect(() => () => { rendererRef.current?.dispose(); restorationClient.dispose(); }, []);
 
@@ -226,6 +255,7 @@ export function App() {
       canvas.width = 1;
       canvas.height = 1;
       setActiveBrushRegionId(undefined);
+      setActiveRasterPaint(undefined);
       return;
     }
     const imageId = currentSlot.state.imageId;
@@ -245,6 +275,7 @@ export function App() {
       const previous = rendererRef.current;
       const renderer = new PhotoRenderer(canvas);
       renderer.loadBitmap(bitmap);
+      for (const region of currentSlot.state.regions) if (region.shape === 'raster') renderer.setMask(region.maskRef, maskStoreRef.current.get(region.maskRef));
       if (cancelled) { renderer.dispose(); return; }
       rendererRef.current = renderer;
       renderedImageIdRef.current = imageId;
@@ -260,7 +291,7 @@ export function App() {
   // 删除照片或离开页面时释放对应的去雾分析系数缓存。
   useEffect(() => {
     const imageId = currentSlot?.state.imageId;
-    return () => { if (imageId) restorationClient.releaseImage(imageId); };
+    return () => { if (imageId) { restorationClient.releaseImage(imageId); maskStoreRef.current.releaseImage(imageId); } };
   }, [currentSlot?.state.imageId]);
 
   const handleFit = useCallback(() => { setZoom(100); draw(); }, [draw]);
@@ -395,7 +426,7 @@ export function App() {
       brushRadius: 0.06,
       brushDabs: [],
       adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
-    };
+    } as Region;
     commit({ ...state, regions: [...state.regions, region] });
     if (shape === 'brush') setActiveBrushRegionId(region.id);
   };
@@ -432,7 +463,7 @@ export function App() {
     const stroke = brushStrokeRef.current;
     if (!stroke || !state) return;
     const region = state.regions.find((item) => item.id === stroke.regionId);
-    if (!region) return;
+    if (!region || region.shape !== 'brush') return;
     const minimumDistance = region.brushRadius * .3;
     if (stroke.last && Math.hypot(point.x - stroke.last.x, point.y - stroke.last.y) < minimumDistance) return;
     if (stroke.dabs.length >= 32) return;
@@ -440,7 +471,25 @@ export function App() {
   };
 
   const handleBrushPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!state || candidate || !activeBrushRegionId) return;
+    if (!state || candidate) return;
+    if (pointSelectionActive) {
+      const point = pointFromCanvasEvent(event);
+      if (!point || pointDraft.length >= 16) return;
+      const next = [...pointDraft, { ...point, label: event.shiftKey ? 0 as const : 1 as const }];
+      setPointDraft(next);
+      void requestPointSegmentation(next);
+      event.preventDefault();
+      return;
+    }
+    if (activeRasterPaint) {
+      const region = state.regions.find((item) => item.id === activeRasterPaint.regionId);
+      const point = pointFromCanvasEvent(event);
+      if (!region || region.shape !== 'raster' || !point) return;
+      rasterStrokeRef.current = { regionId: region.id, operation: activeRasterPaint.operation, points: [point], last: point };
+      event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault();
+      return;
+    }
+    if (!activeBrushRegionId) return;
     const region = state.regions.find((item) => item.id === activeBrushRegionId);
     const point = pointFromCanvasEvent(event);
     if (!region || region.shape !== 'brush' || !point) return;
@@ -451,12 +500,29 @@ export function App() {
   };
 
   const handleBrushPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const rasterStroke = rasterStrokeRef.current;
+    if (rasterStroke) {
+      const point = pointFromCanvasEvent(event);
+      if (point && (!rasterStroke.last || Math.hypot(point.x - rasterStroke.last.x, point.y - rasterStroke.last.y) >= .01)) { rasterStroke.points.push(point); rasterStroke.last = point; }
+      return;
+    }
     if (!brushStrokeRef.current) return;
     const point = pointFromCanvasEvent(event);
     if (point) appendBrushDab(point);
   };
 
   const finishBrushStroke = () => {
+    const rasterStroke = rasterStrokeRef.current;
+    rasterStrokeRef.current = undefined;
+    if (rasterStroke && state && !candidate) {
+      const region = state.regions.find((item) => item.id === rasterStroke.regionId);
+      if (region?.shape === 'raster') {
+        const maskRef = maskStoreRef.current.paint(region.maskRef, rasterStroke.points, .02, rasterStroke.operation);
+        commit({ ...state, regions: state.regions.map((item) => item.id === region.id ? { ...item, maskRef } : item) });
+        setStatus(rasterStroke.operation === 'add' ? '已补选蒙版区域' : '已擦除蒙版区域');
+      }
+      return;
+    }
     const stroke = brushStrokeRef.current;
     brushStrokeRef.current = undefined;
     if (!stroke || !state || candidate) return;
@@ -509,6 +575,7 @@ export function App() {
       const offscreen = document.createElement('canvas');
       const currentRenderer = new PhotoRenderer(offscreen);
       currentRenderer.loadBitmap(await prepareFullBitmap(currentSlot, state, 'export'));
+      for (const region of state.regions) if (region.shape === 'raster') currentRenderer.setMask(region.maskRef, maskStoreRef.current.get(region.maskRef));
       currentRenderer.render(state, original.width, original.height);
       const current = await previewFromBlob(await currentRenderer.toBlob(0.85), 1024);
       currentRenderer.dispose();
@@ -522,6 +589,7 @@ export function App() {
         schemaVersion: SCHEMA_VERSION,
         requestId: uid(),
         imageId: state.imageId,
+        sourceVersion: state.sourceVersion,
         baseRevision: state.revision,
         mode,
         instruction: mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim(),
@@ -551,6 +619,106 @@ export function App() {
     }
   };
 
+  /** 手动输入一个清晰概念时，直接请求 SAM3，避免为了局部选择额外调用 LLM。 */
+  const requestSamSegmentation = async () => {
+    if (!state || !currentSlot || candidate) return;
+    const instructionText = instruction.trim();
+    if (!instructionText) { setStatus('请输入想调整的对象，例如“提亮人物”或“sky”'); return; }
+    try {
+      controllerRef.current?.abort();
+      const signal = new AbortController();
+      controllerRef.current = signal;
+      setBusy(true); setStatus('正在准备 SAM3 选区');
+      let preview = await previewFromBlob(currentSlot.blob, 1024, .8);
+      for (const edge of [896, 768, 640]) {
+        if (preview.blob.size <= 512 * 1024) break;
+        preview = await previewFromBlob(currentSlot.blob, edge, .7);
+      }
+      if (preview.blob.size > 512 * 1024) throw new Error('图片缩略图超过 512 KiB，无法安全发送给 SAM3');
+      const originalBase64 = await toBase64(preview.blob);
+      let queries: SegmentIntent['queries'] = [{ labelZh: instructionText, textQuery: instructionText }];
+      // 明确输入英文概念时可跳过 LLM；中文自然语言先让视觉模型提取至多三个概念。
+      if (!/^[\x20-\x7e]+$/.test(instructionText)) {
+        setStatus('正在识别需要调整的对象');
+        const intentResponse = await fetch('/api/segment-intent', { method: 'POST', headers: { 'content-type': 'application/json' }, signal: signal.signal, body: JSON.stringify({ requestId: uid(), imageId: state.imageId, sourceVersion: state.sourceVersion, baseRevision: state.revision, instruction: instructionText, originalPreview: { mime: 'image/jpeg', width: preview.width, height: preview.height, base64: originalBase64 }, regions: state.regions.map((region) => ({ id: region.id, label: region.label })), selectedRegionId: null }) });
+        const intentBody = await intentResponse.json() as { message?: string; intent?: SegmentIntent };
+        if (!intentResponse.ok) throw new Error(intentBody.message ?? '概念识别请求失败');
+        if (!intentBody.intent || intentBody.intent.status === 'clarify') throw new Error(intentBody.intent?.message || '请说明需要调整照片中的哪个对象');
+        queries = intentBody.intent.queries;
+        if (queries.length === 0) throw new Error('没有需要新识别的对象，可直接调整已有局部区域');
+      }
+      const results: Array<{ query: SegmentIntent['queries'][number]; result: SegmentResponse }> = [];
+      for (const query of queries.slice(0, 3)) {
+        setStatus(`SAM3 正在识别“${query.labelZh}”`);
+        const response = await fetch('/api/segment', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: uid(), imageId: state.imageId, sourceVersion: state.sourceVersion, baseRevision: state.revision, preview: { mime: 'image/jpeg', width: preview.width, height: preview.height, base64: originalBase64 }, prompt: { kind: 'text', textQuery: query.textQuery, confidenceThreshold: .45 } }), signal: signal.signal });
+        const result = await response.json() as SegmentResponse & { message?: string };
+        if (!response.ok) throw new Error(result.message ?? 'SAM3 分割请求失败');
+        if (result.imageId !== state.imageId || result.sourceVersion !== state.sourceVersion || result.baseRevision !== state.revision) throw new Error('识别结果已过期');
+        results.push({ query, result });
+      }
+      const prepared = await Promise.all(results.flatMap(({ query, result }) => result.annotations.map(async (annotation) => {
+        const maskResponse = await fetch(annotation.maskUrl, { signal: signal.signal });
+        if (!maskResponse.ok) throw new Error('无法下载 SAM3 返回的蒙版');
+        const decoded = await alphaFromMaskPng(await maskResponse.blob(), result.inputWidth, result.inputHeight);
+        const metrics = maskMetrics(decoded.width, decoded.height, decoded.pixels);
+        if (metrics.areaRatio === 0) return undefined;
+        const maskRef = maskStoreRef.current.create({ imageId: state.imageId, sourceVersion: state.sourceVersion, ...decoded, origin: 'sam3' });
+        return { candidateId: uid(), imageId: state.imageId, sourceVersion: state.sourceVersion, query: query.textQuery, displayLabel: annotation.label || query.labelZh, maskRef, width: decoded.width, height: decoded.height, ...metrics } satisfies SamCandidate;
+      })));
+      const next = prepared.filter(Boolean).slice(0, 8) as SamCandidate[];
+      setSamCandidates(next);
+      setStatus(next.length ? `已找到 ${next.length} 个选区，选择一个加入局部调整` : 'SAM3 没有找到可用选区');
+    } catch (error) {
+      if ((error as DOMException).name === 'AbortError') setStatus('已取消 SAM3 识别');
+      else setStatus(error instanceof Error ? error.message : 'SAM3 识别失败');
+    } finally { setBusy(false); }
+  };
+
+  /** 对同一个草稿完整重发点集；revision 确保快速点选时旧蒙版不会覆盖新结果。 */
+  const requestPointSegmentation = async (points: Array<{ x: number; y: number; label: 0 | 1 }>) => {
+    if (!state || !currentSlot || !pointSegmentationSupported) return;
+    const revision = ++pointRevisionRef.current;
+    try {
+      controllerRef.current?.abort();
+      const signal = new AbortController(); controllerRef.current = signal;
+      setBusy(true); setStatus('SAM3 正在根据点击位置生成选区');
+      let preview = await previewFromBlob(currentSlot.blob, 1024, .8);
+      for (const edge of [896, 768, 640]) { if (preview.blob.size <= 512 * 1024) break; preview = await previewFromBlob(currentSlot.blob, edge, .7); }
+      if (preview.blob.size > 512 * 1024) throw new Error('图片缩略图超过 512 KiB，无法安全发送给 SAM3');
+      const response = await fetch('/api/segment', { method: 'POST', headers: { 'content-type': 'application/json' }, signal: signal.signal, body: JSON.stringify({ requestId: uid(), imageId: state.imageId, sourceVersion: state.sourceVersion, baseRevision: state.revision, preview: { mime: 'image/jpeg', width: preview.width, height: preview.height, base64: await toBase64(preview.blob) }, prompt: { kind: 'point', points } }) });
+      const result = await response.json() as SegmentResponse & { message?: string };
+      if (!response.ok) throw new Error(result.message ?? 'SAM3 点选请求失败');
+      if (revision !== pointRevisionRef.current || result.imageId !== state.imageId || result.sourceVersion !== state.sourceVersion || result.baseRevision !== state.revision) return;
+      const prepared = await Promise.all(result.annotations.map(async (annotation) => {
+        const maskResponse = await fetch(annotation.maskUrl, { signal: signal.signal });
+        if (!maskResponse.ok) throw new Error('无法下载 SAM3 返回的蒙版');
+        const decoded = await alphaFromMaskPng(await maskResponse.blob(), result.inputWidth, result.inputHeight);
+        const metrics = maskMetrics(decoded.width, decoded.height, decoded.pixels);
+        if (metrics.areaRatio === 0) return undefined;
+        const maskRef = maskStoreRef.current.create({ imageId: state.imageId, sourceVersion: state.sourceVersion, ...decoded, origin: 'sam3' });
+        return { candidateId: uid(), imageId: state.imageId, sourceVersion: state.sourceVersion, query: null, displayLabel: '选区 1', maskRef, width: decoded.width, height: decoded.height, ...metrics } satisfies SamCandidate;
+      }));
+      if (revision !== pointRevisionRef.current) return;
+      const next = prepared.filter(Boolean).slice(0, 8) as SamCandidate[];
+      setSamCandidates(next);
+      setStatus(next.length ? '已生成待确认选区，可加入局部调整或继续点选' : 'SAM3 没有生成可用选区');
+    } catch (error) {
+      if ((error as DOMException).name === 'AbortError') return;
+      if (revision === pointRevisionRef.current) setStatus(error instanceof Error ? error.message : 'SAM3 点选失败');
+    } finally { if (revision === pointRevisionRef.current) setBusy(false); }
+  };
+
+  const applySamCandidate = (item: SamCandidate) => {
+    if (!state || candidate || state.regions.length >= 4) { setStatus('局部区域最多四个'); return; }
+    if (item.imageId !== state.imageId || item.sourceVersion !== state.sourceVersion) { setStatus('选区已过期，请重新识别'); return; }
+    commit({ ...state, regions: [...state.regions, {
+      id: uid(), label: item.displayLabel.slice(0, 40), enabled: true, mode: 'inside', shape: 'raster', maskRef: item.maskRef, featherRadius: 0,
+      adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
+    }] });
+    setSamCandidates((items) => items.filter((candidateItem) => candidateItem.candidateId !== item.candidateId));
+    setStatus('选区已加入局部调整，可在右侧设置曝光、高光和饱和度');
+  };
+
   const applyCandidate = () => {
     if (!state || !candidate || candidate.baseRevision !== state.revision) return;
     try {
@@ -575,6 +743,7 @@ export function App() {
       const offscreen = document.createElement('canvas');
       const output = new PhotoRenderer(offscreen);
       output.loadBitmap(await prepareFullBitmap(currentSlot, state, 'export'));
+      for (const region of state.regions) if (region.shape === 'raster') output.setMask(region.maskRef, maskStoreRef.current.get(region.maskRef));
       output.render(state, outW, outH, 1);
       const selectedFormat = format === 'tiff'
         ? { blob: new Blob([UTIF.encodeImage(output.rgbaPixels(), offscreen.width, offscreen.height)], { type: 'image/tiff' }), extension: 'tiff', label: 'TIFF（无压缩）' }
@@ -654,9 +823,9 @@ export function App() {
           <div className="canvasWrap" onWheel={(event) => { if (!state) return; event.preventDefault(); setZoom((value) => Math.min(200, Math.max(25, value + (event.deltaY < 0 ? 10 : -10)))); }}>
             <canvas
               ref={canvasRef}
-              className={activeBrushRegionId ? 'brush-canvas' : undefined}
+              className={activeBrushRegionId || activeRasterPaint || pointSelectionActive ? 'brush-canvas' : undefined}
               style={{ transform: `scale(${zoom / 100})` }}
-              aria-label={activeBrushRegionId ? '画笔蒙版画布，按住并拖动涂抹' : '照片编辑画布'}
+              aria-label={pointSelectionActive ? '点选物体画布，点击选择目标，按住 Shift 点击排除区域' : activeBrushRegionId || activeRasterPaint ? '蒙版画布，按住并拖动涂抹' : '照片编辑画布'}
               onPointerDown={handleBrushPointerDown}
               onPointerMove={handleBrushPointerMove}
               onPointerUp={finishBrushStroke}
@@ -671,6 +840,10 @@ export function App() {
             busy={busy}
             onAuto={() => void requestPlan('auto')}
             onFollowup={() => void requestPlan('followup')}
+            onSegment={() => void requestSamSegmentation()}
+            pointSegmentationSupported={pointSegmentationSupported}
+            pointSelectionActive={pointSelectionActive}
+            onTogglePointSelection={() => { setPointSelectionActive((value) => !value); setActiveBrushRegionId(undefined); setActiveRasterPaint(undefined); setStatus(pointSelectionActive ? '已结束点选' : '请在照片上点击目标；按住 Shift 可添加排除点'); }}
             onCancel={() => controllerRef.current?.abort()}
             onClose={() => setBottomPanelOpen(false)}
             thumbnail={currentSlot?.thumbnail}
@@ -680,6 +853,11 @@ export function App() {
             referencePhoto={referencePhoto}
             onReferenceImport={(file) => void handleReferenceImport(file)}
             onRemoveReference={() => { controllerRef.current?.abort(); setReferencePhoto(undefined); setCandidate(); setStatus('已移除参考图'); }}
+            samCandidates={samCandidates}
+            onApplySamCandidate={(candidateId) => {
+              const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);
+              if (item) applySamCandidate(item);
+            }}
           />}
         </div>
         {rightPanelOpen && <ControlsPanel
@@ -697,6 +875,8 @@ export function App() {
           onDeleteRegion={handleDeleteRegion}
           activeBrushRegionId={activeBrushRegionId}
           onPaintBrush={setActiveBrushRegionId}
+          activeRasterPaint={activeRasterPaint}
+          onPaintRaster={(regionId, operation) => { setActiveBrushRegionId(undefined); setActiveRasterPaint(regionId && operation ? { regionId, operation } : undefined); }}
           onResetCrop={handleResetCrop}
           onEditInteractionStart={beginInteraction}
           onEditInteractionEnd={endInteraction}

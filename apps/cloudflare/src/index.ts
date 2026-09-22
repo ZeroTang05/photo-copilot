@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from '../node_modules/zod/index.js';
+import { Client, handle_file } from '@gradio/client';
 import { EditStateSchema, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION, validatePlan } from '../../../packages/domain/src/index';
 
 interface Env {
@@ -11,13 +12,23 @@ interface Env {
   ALLOWED_ORIGIN?: string;
   DAILY_AI_ATTEMPT_LIMIT?: string;
   DAILY_AI_ATTEMPT_LIMIT_PER_SESSION?: string;
+  SAM_PROVIDER?: 'hf-gradio';
+  SAM_SPACE_URL?: string;
+  SAM_HF_TOKEN?: string;
+  SAM_TIMEOUT_MS?: string;
+  SAM_POINT_SEGMENTATION?: string;
+  SAM_POINT_ENDPOINT?: string;
   AI_QUOTA: DurableObjectNamespace;
   ASSETS: Fetcher;
 }
 
 type Session = { attempts: number; day: string; requestIds: Record<string, number> };
 const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
-const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(), context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict();
+const SegmentPromptSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('text'), textQuery: z.string().trim().min(1).max(80), confidenceThreshold: z.number().finite().min(0).max(1) }).strict(), z.object({ kind: z.literal('point'), points: z.array(z.object({ x: z.number().finite().min(0).max(1), y: z.number().finite().min(0).max(1), label: z.union([z.literal(0), z.literal(1)]) }).strict()).min(1).max(16) }).strict()]);
+const SegmentRequestSchema = z.object({ requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), preview: PreviewSchema, prompt: SegmentPromptSchema }).strict();
+const SamOutputSchema = z.object({ image: z.object({ url: z.string().url() }).passthrough(), annotations: z.array(z.object({ image: z.object({ url: z.string().url() }).passthrough(), label: z.string() }).passthrough()) }).passthrough();
+const SamPointOutputSchema = z.object({ inputWidth: z.number().int().positive(), inputHeight: z.number().int().positive(), encoding: z.enum(['gray8', 'rgba-alpha']), mask: z.object({ url: z.string().url() }).passthrough() }).passthrough();
+const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(), context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict().superRefine((value, ctx) => { if (value.sourceVersion !== value.state.sourceVersion || value.baseRevision !== value.state.revision || value.imageId !== value.state.imageId) ctx.addIssue({ code: 'custom', message: '请求身份与编辑状态不一致' }); });
 const today = () => new Date().toISOString().slice(0, 10);
 const error = (code: string, message: string, retryAfterSeconds: number | null = null) => ({ code, message, retryAfterSeconds });
 const response = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
@@ -66,6 +77,39 @@ function allowed(request: Request, env: Env) {
   const origin = request.headers.get('origin');
   const origins = env.ALLOWED_ORIGIN?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
   return Boolean(origin && (origins.length ? origins.includes(origin) : origin === new URL(request.url).origin));
+}
+
+function jpegBytes(base64: string, preview: z.infer<typeof PreviewSchema>) {
+  const binary = atob(base64);
+  if (binary.length > 512 * 1024) throw new Error('分析图片超过大小限制');
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('分析图片必须是 JPEG');
+  return new Blob([bytes], { type: preview.mime });
+}
+
+/** Cloudflare Worker 与 Node 网关共用官方 Gradio SDK；只调用部署配置的 SAM3 Space。 */
+async function segmentWithSam(env: Env, jpeg: Blob, prompt: z.infer<typeof SegmentPromptSchema>, inputWidth: number, inputHeight: number) {
+  const spaceUrl = env.SAM_SPACE_URL || 'https://prithivmlmods-sam3-demo.hf.space';
+  const timeoutMs = Math.min(Number(env.SAM_TIMEOUT_MS ?? 75_000), 75_000);
+  let client: Client | undefined;
+  try {
+    client = await Client.connect(spaceUrl, env.SAM_HF_TOKEN?.startsWith('hf_') ? { token: env.SAM_HF_TOKEN as `hf_${string}` } : undefined);
+    if (prompt.kind === 'point' && env.SAM_POINT_SEGMENTATION !== 'true') throw new Error('POINT_SEGMENTATION_UNAVAILABLE');
+    const request = prompt.kind === 'text'
+      ? client.predict('/run_image_segmentation', { source_img: handle_file(jpeg), text_query: prompt.textQuery, conf_thresh: prompt.confidenceThreshold })
+      : client.predict(env.SAM_POINT_ENDPOINT || '/segment_points', { image: handle_file(jpeg), points: prompt.points.map((point) => ({ x: Math.min(inputWidth - 1, Math.floor(point.x * inputWidth)), y: Math.min(inputHeight - 1, Math.floor(point.y * inputHeight)), label: point.label })) });
+    const output = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SAM_TIMEOUT')), timeoutMs)),
+    ]);
+    const raw = Array.isArray(output.data) ? output.data[0] : undefined;
+    const parsed = prompt.kind === 'text' ? SamOutputSchema.safeParse(raw) : SamPointOutputSchema.safeParse(raw);
+    if (!parsed.success) throw new Error('SAM_OUTPUT_INVALID');
+    const allowedHost = new URL(spaceUrl).host;
+    const annotations = prompt.kind === 'text' ? parsed.data.annotations : [{ image: parsed.data.mask, label: '选区 1' }];
+    for (const annotation of annotations) if (new URL(annotation.image.url).host !== allowedHost) throw new Error('SAM_OUTPUT_INVALID');
+    return annotations;
+  } finally { client?.close(); }
 }
 
 export class AiQuota extends DurableObject {
@@ -237,6 +281,27 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
     const stored = await quota(env, { action: 'read', sessionId: session.id, ...limits });
     return response({ authenticated: true, ...await stored.json() }, 200, session.cookie ? { 'set-cookie': session.cookie } : undefined);
   }
+  if (request.method === 'GET' && url.pathname === '/api/segment-capabilities') return response({ pointSegmentation: env.SAM_POINT_SEGMENTATION === 'true' }, 200, { 'cache-control': 'no-store' });
+  if (request.method === 'POST' && url.pathname === '/api/segment') {
+    if (!allowed(request, env)) return response(error('ORIGIN_DENIED', '当前来源无法使用服务'), 403);
+    let parsed; let jpeg: Blob;
+    try { parsed = SegmentRequestSchema.parse(await request.json()); jpeg = jpegBytes(parsed.preview.base64, parsed.preview); } catch (cause) {
+      writeLog('error', 'sam.segment.request_invalid', { error: errorLogDetails(cause) });
+      return response(error('SEGMENT_REQUEST_INVALID', '分割图片或概念不符合要求'), 400);
+    }
+    const reserved = await quota(env, { action: 'reserve', sessionId: session.id, requestId: parsed.requestId, ...limits });
+    if (!reserved.ok) return response({ ...await reserved.json() as object, requestId: parsed.requestId }, reserved.status, session.cookie ? { 'set-cookie': session.cookie } : undefined);
+    const started = Date.now();
+    try {
+      const annotations = await segmentWithSam(env, jpeg, parsed.prompt, parsed.preview.width, parsed.preview.height);
+      return response({ status: annotations.length ? 'ok' : 'empty', requestId: parsed.requestId, imageId: parsed.imageId, sourceVersion: parsed.sourceVersion, baseRevision: parsed.baseRevision, provider: 'hf-gradio', adapterVersion: 'gradio-js-2.7.0', inputWidth: parsed.preview.width, inputHeight: parsed.preview.height, annotations: annotations.map((item, index) => ({ index, label: item.label, maskUrl: item.image.url, score: null })), durationMs: Date.now() - started }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+    } catch (cause) {
+      const message = cause instanceof Error && cause.message === 'POINT_SEGMENTATION_UNAVAILABLE' ? '当前 SAM3 提供方未开放点选蒙版接口' : cause instanceof Error && cause.message === 'SAM_TIMEOUT' ? 'SAM3 分割等待超时，请重新请求' : 'SAM3 服务暂时不可用，请稍后再试';
+      const code = cause instanceof Error && cause.message === 'POINT_SEGMENTATION_UNAVAILABLE' ? 'POINT_SEGMENTATION_UNAVAILABLE' : cause instanceof Error && cause.message === 'SAM_TIMEOUT' ? 'SAM_TIMEOUT' : 'SAM_PROVIDER_ERROR';
+      writeLog('error', 'sam.segment.failed', { requestId: parsed.requestId, imageId: parsed.imageId, code, error: errorLogDetails(cause) });
+      return response({ ...error(code, message), requestId: parsed.requestId }, code === 'SAM_TIMEOUT' ? 504 : 502, session.cookie ? { 'set-cookie': session.cookie } : undefined);
+    }
+  }
   if (request.method === 'POST' && url.pathname === '/api/plan') {
     if (!allowed(request, env)) {
       writeLog('error', 'ai.plan.origin_denied', { origin: request.headers.get('origin') });
@@ -288,7 +353,7 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
         usage: output.usage,
         planOutput: output.payload,
       });
-      return response({ requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: 'pc-planner-1', rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+      return response({ requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: 'pc-planner-2', rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
     } catch (cause) {
       writeLog('error', 'ai.plan.failed', {
         requestId: parsed.requestId,

@@ -1,4 +1,11 @@
-import type { EditState } from '@photo-copilot/domain';
+import type { EditState, MaskRef } from '@photo-copilot/domain';
+
+/** 浏览器蒙版仓库提供给渲染器的单通道像素资源。 */
+export interface RasterMask {
+  width: number;
+  height: number;
+  pixels: Uint8Array;
+}
 
 const vertex = `#version 300 es
 in vec2 a_position; out vec2 v_uv;
@@ -15,6 +22,7 @@ precision highp float;
 uniform sampler2D u_image; uniform vec2 u_sourceSize; uniform vec2 u_textureSize; uniform vec2 u_output;
 uniform float u_exposure,u_contrast,u_highlights,u_shadows,u_whites,u_blacks,u_clarity,u_warmth,u_tint,u_vibrance,u_saturation,u_angle;
 uniform vec4 u_crop; uniform int u_count; uniform vec4 u_regions[4]; uniform vec4 u_local[4]; uniform vec4 u_meta[4];
+uniform sampler2D u_masks[4]; uniform vec2 u_maskSize[4]; uniform int u_maskAvailable[4];
 uniform int u_brushCount; uniform vec4 u_brushDabs[128];
 in vec2 v_uv; out vec4 outColor;
 vec3 decode(vec3 s){return mix(s/12.92,pow((s+.055)/1.055,vec3(2.4)),step(vec3(.04045),s));}
@@ -39,6 +47,12 @@ vec3 sampleImage(vec2 uv){
   vec2 a=(clamp(i,vec2(0),u_textureSize-1.)+.5)*texel; vec2 b=(clamp(i+vec2(1,0),vec2(0),u_textureSize-1.)+.5)*texel;
   vec2 c=(clamp(i+vec2(0,1),vec2(0),u_textureSize-1.)+.5)*texel; vec2 d=(clamp(i+vec2(1),vec2(0),u_textureSize-1.)+.5)*texel;
   return mix(mix(decode(texture(u_image,a).rgb),decode(texture(u_image,b).rgb),f.x),mix(decode(texture(u_image,c).rgb),decode(texture(u_image,d).rgb),f.x),f.y);
+}
+float sampleMask(int index,vec2 uv){
+  if(index==0) return texture(u_masks[0],uv).r;
+  if(index==1) return texture(u_masks[1],uv).r;
+  if(index==2) return texture(u_masks[2],uv).r;
+  return texture(u_masks[3],uv).r;
 }
 void main(){
   // 自动裁切：旋转后选取能够完全落入原裁切区的最大同画幅矩形。
@@ -73,13 +87,22 @@ void main(){
       vec2 direction=vec2(cos(u_meta[i].y),sin(u_meta[i].y));
       float position=dot(uv-rg.xy,direction);
       mask=1.-smoothstep(-feather,feather,position);
-    } else {
+    } else if(shape<2.5) {
       for(int b=0;b<128;b++){
         if(b>=u_brushCount) break; vec4 dab=u_brushDabs[b];
         if(abs(dab.w-float(i))>.1) continue;
         float distanceToDab=length(uv-dab.xy);
         mask=max(mask,1.-smoothstep(dab.z*(1.-feather),dab.z,distanceToDab));
       }
+    } else if(u_maskAvailable[i] == 1) {
+      mask=sampleMask(i,uv);
+      // raster 羽化按蒙版纹理像素计算，基础像素不会被反复模糊。
+      float radius=u_meta[i].y;
+      if(radius>.00001){
+        vec2 stepUv=vec2(radius*u_sourceSize.y)/u_maskSize[i];
+        mask=(mask+sampleMask(i,uv+vec2(stepUv.x,0.))+sampleMask(i,uv-vec2(stepUv.x,0.))+sampleMask(i,uv+vec2(0.,stepUv.y))+sampleMask(i,uv-vec2(0.,stepUv.y)))/5.;
+      }
+      if(signedFeather<0.) mask=1.-mask;
     }
     vec3 local=tone(global,u_local[i].x,u_local[i].y,u_local[i].z); result+=mask*(local-global);
   }
@@ -95,6 +118,7 @@ export class PhotoRenderer {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
   private texture: WebGLTexture;
+  private readonly maskTextures = new Map<string, { texture: WebGLTexture; width: number; height: number }>();
   private bitmap?: ImageBitmap;
   constructor(private readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, premultipliedAlpha: false });
@@ -108,6 +132,32 @@ export class PhotoRenderer {
   }
   async load(blob: Blob) { this.loadBitmap(await createImageBitmap(blob, { imageOrientation: 'from-image' })); }
   loadBitmap(bitmap: ImageBitmap) { this.bitmap?.close(); this.bitmap = bitmap; const gl=this.gl; gl.bindTexture(gl.TEXTURE_2D,this.texture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,this.bitmap); /* FLIP_Y 在本路径无效,方向纠正由 vertex 内的 uv.y 翻转承担 */ }
+  /** 上传或替换一个 R8 单通道蒙版。资源身份含版本，历史状态可安全复用旧版本。 */
+  setMask(maskRef: MaskRef, mask: RasterMask) {
+    if (mask.pixels.length !== mask.width * mask.height) throw new Error('蒙版像素尺寸不匹配');
+    const key = `${maskRef.assetId}:${maskRef.version}`;
+    const previous = this.maskTextures.get(key);
+    if (previous) this.gl.deleteTexture(previous.texture);
+    const texture = this.gl.createTexture();
+    if (!texture) throw new Error('无法创建蒙版纹理');
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, mask.width, mask.height, 0, gl.RED, gl.UNSIGNED_BYTE, mask.pixels);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.maskTextures.set(key, { texture, width: mask.width, height: mask.height });
+  }
+  /** 删除不再被任何当前状态、历史或候选计划引用的显卡资源。 */
+  releaseMask(maskRef: MaskRef) {
+    const key = `${maskRef.assetId}:${maskRef.version}`;
+    const item = this.maskTextures.get(key);
+    if (item) this.gl.deleteTexture(item.texture);
+    this.maskTextures.delete(key);
+  }
   render(state: EditState, width = this.canvas.clientWidth, height = this.canvas.clientHeight, pixelRatio = devicePixelRatio || 1) {
     if (!this.bitmap) return; const gl=this.gl; this.canvas.width=Math.max(1,Math.round(width*pixelRatio)); this.canvas.height=Math.max(1,Math.round(height*pixelRatio)); gl.viewport(0,0,this.canvas.width,this.canvas.height); gl.useProgram(this.program);
     const uniform=(name:string)=>gl.getUniformLocation(this.program,name); const g=state.global;
@@ -116,19 +166,31 @@ export class PhotoRenderer {
     gl.uniform2f(uniform('u_sourceSize'),state.sourceWidth,state.sourceHeight); gl.uniform2f(uniform('u_textureSize'),this.bitmap.width,this.bitmap.height); gl.uniform2f(uniform('u_output'),this.canvas.width,this.canvas.height);
     gl.uniform1f(uniform('u_exposure'),g.exposureEV); gl.uniform1f(uniform('u_contrast'),g.contrast/100); gl.uniform1f(uniform('u_highlights'),g.highlights/100); gl.uniform1f(uniform('u_shadows'),g.shadows/100); gl.uniform1f(uniform('u_whites'),g.whites/100); gl.uniform1f(uniform('u_blacks'),g.blacks/100); gl.uniform1f(uniform('u_clarity'),g.clarity/100); gl.uniform1f(uniform('u_warmth'),g.warmth/100); gl.uniform1f(uniform('u_tint'),g.tint/100); gl.uniform1f(uniform('u_vibrance'),g.vibrance/100); gl.uniform1f(uniform('u_saturation'),g.saturation/100);
     gl.uniform1f(uniform('u_angle'),state.transform.angleDeg*Math.PI/180); const c=state.transform.crop; gl.uniform4f(uniform('u_crop'),c.x,c.y,c.width,c.height); gl.uniform1i(uniform('u_count'),state.regions.length);
-    const regions=new Float32Array(16), locals=new Float32Array(16), meta=new Float32Array(16), brushDabs=new Float32Array(128 * 4); let brushCount=0;
+    const regions=new Float32Array(16), locals=new Float32Array(16), meta=new Float32Array(16), maskSize=new Float32Array(8), maskAvailable=new Int32Array(4), brushDabs=new Float32Array(128 * 4); let brushCount=0;
     state.regions.forEach((region,index)=>{
       const j=index*4;
-      regions.set([region.centerX,region.centerY,region.radiusX,region.radiusY],j);
-      const signedFeather=region.enabled && (region.shape !== 'brush' || region.brushDabs.length > 0) ? (region.mode==='outside' && region.shape==='ellipse' ? -region.feather : region.feather) : 0;
+      const geometric = region.shape !== 'raster';
+      regions.set(geometric ? [region.centerX,region.centerY,region.radiusX,region.radiusY] : [0,0,0,0],j);
+      const signedFeather=region.enabled && (region.shape !== 'brush' || region.brushDabs.length > 0) ? (region.mode==='outside' && region.shape !== 'linear' ? -(region.shape === 'raster' ? 1 : region.feather) : region.shape === 'raster' ? 1 : region.feather) : 0;
       locals.set([region.adjustments.exposureEV,region.adjustments.highlights/100,region.adjustments.saturation/100,signedFeather],j);
-      meta.set([region.shape === 'ellipse' ? 0 : region.shape === 'linear' ? 1 : 2, region.angleDeg * Math.PI / 180, region.brushRadius, 0],j);
+      meta.set([region.shape === 'ellipse' ? 0 : region.shape === 'linear' ? 1 : region.shape === 'brush' ? 2 : 3, region.shape === 'raster' ? region.featherRadius : region.angleDeg * Math.PI / 180, region.shape === 'raster' ? 0 : region.brushRadius, 0],j);
       if(region.shape === 'brush') for(const dab of region.brushDabs) {
         if(brushCount >= 128) break;
         brushDabs.set([dab.x,dab.y,region.brushRadius,index],brushCount * 4); brushCount++;
       }
+      if (region.shape === 'raster') {
+        const item = this.maskTextures.get(`${region.maskRef.assetId}:${region.maskRef.version}`);
+        if (!item) throw new Error(`缺少蒙版资源：${region.label}`);
+        gl.activeTexture(gl.TEXTURE1 + index);
+        gl.bindTexture(gl.TEXTURE_2D, item.texture);
+        maskSize.set([item.width, item.height], index * 2);
+        maskAvailable[index] = 1;
+      }
     });
-    gl.uniform4fv(uniform('u_regions'),regions); gl.uniform4fv(uniform('u_local'),locals); gl.uniform4fv(uniform('u_meta'),meta); gl.uniform1i(uniform('u_brushCount'),brushCount); gl.uniform4fv(uniform('u_brushDabs'),brushDabs); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.uniform1i(uniform('u_image'), 0);
+    gl.uniform1iv(uniform('u_masks'), new Int32Array([1, 2, 3, 4]));
+    gl.uniform4fv(uniform('u_regions'),regions); gl.uniform4fv(uniform('u_local'),locals); gl.uniform4fv(uniform('u_meta'),meta); gl.uniform2fv(uniform('u_maskSize'),maskSize); gl.uniform1iv(uniform('u_maskAvailable'),maskAvailable); gl.uniform1i(uniform('u_brushCount'),brushCount); gl.uniform4fv(uniform('u_brushDabs'),brushDabs); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
   async analysisBlob(state: EditState, maxEdge=1024) { const width=this.bitmap!.width, height=this.bitmap!.height, scale=Math.min(1,maxEdge/Math.max(width,height)); const canvas=document.createElement('canvas'); canvas.width=Math.round(width*scale); canvas.height=Math.round(height*scale); const renderer=new PhotoRenderer(canvas); await renderer.load(await this.toBlob()); renderer.render({ ...state, transform: { ...state.transform, angleDeg: 0, crop: {x:0,y:0,width:1,height:1} } },canvas.width,canvas.height); return new Promise<Blob>((resolve,reject)=>canvas.toBlob((blob)=>blob?resolve(blob):reject(new Error('缩略图编码失败')),'image/jpeg',.85)); }
   // 浏览器负责图片编码；若格式不受支持，canvas 会退回 PNG，这里直接报错以避免文件扩展名与真实内容不一致。
@@ -150,5 +212,5 @@ export class PhotoRenderer {
     }
     return topDown;
   }
-  dispose(){ this.bitmap?.close(); this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program); }
+  dispose(){ this.bitmap?.close(); this.gl.deleteTexture(this.texture); for (const item of this.maskTextures.values()) this.gl.deleteTexture(item.texture); this.maskTextures.clear(); this.gl.deleteProgram(this.program); }
 }
