@@ -17,6 +17,7 @@ describe('领域事务', () => {
   it('为既有椭圆区域补充内部径向模式', () => {
     const region = RegionSchema.parse({
       id: '8c7955ce-5f1e-4c37-b927-9460e7791c30', label: '天空', enabled: true,
+      shape: 'ellipse',
       centerX: .5, centerY: .5, radiusX: .2, radiusY: .2, feather: .35,
       adjustments: { exposureEV: -.5, highlights: -20, saturation: 0 },
     });
