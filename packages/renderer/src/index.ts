@@ -12,7 +12,7 @@ void main(){ v_uv=vec2((a_position.x+1.0)*.5, 1.0-(a_position.y+1.0)*.5); gl_Pos
 // 清晰度采用无邻域采样的中间调对比近似,真正的边缘掩码需要后续扩展。
 const fragment = `#version 300 es
 precision highp float;
-uniform sampler2D u_image; uniform vec2 u_size; uniform vec2 u_output;
+uniform sampler2D u_image; uniform vec2 u_sourceSize; uniform vec2 u_textureSize; uniform vec2 u_output;
 uniform float u_exposure,u_contrast,u_highlights,u_shadows,u_whites,u_blacks,u_clarity,u_warmth,u_tint,u_vibrance,u_saturation,u_angle;
 uniform vec4 u_crop; uniform int u_count; uniform vec4 u_regions[4]; uniform vec4 u_local[4]; uniform vec4 u_meta[4];
 uniform int u_brushCount; uniform vec4 u_brushDabs[128];
@@ -35,16 +35,16 @@ vec3 applyClarity(vec3 c,float clarity){
 }
 vec3 tone(vec3 c,float expv,float high,float saturation){ c*=exp2(expv); float y=clamp(lum(c),0.,1.); float h=smoothstep(.45,.95,y); c*=exp2(high*h); return sat(c,saturation); }
 vec3 sampleImage(vec2 uv){
-  vec2 texel=1./u_size; vec2 p=uv*u_size-.5; vec2 i=floor(p); vec2 f=fract(p);
-  vec2 a=(clamp(i,vec2(0),u_size-1.)+.5)*texel; vec2 b=(clamp(i+vec2(1,0),vec2(0),u_size-1.)+.5)*texel;
-  vec2 c=(clamp(i+vec2(0,1),vec2(0),u_size-1.)+.5)*texel; vec2 d=(clamp(i+vec2(1),vec2(0),u_size-1.)+.5)*texel;
+  vec2 texel=1./u_textureSize; vec2 p=uv*u_textureSize-.5; vec2 i=floor(p); vec2 f=fract(p);
+  vec2 a=(clamp(i,vec2(0),u_textureSize-1.)+.5)*texel; vec2 b=(clamp(i+vec2(1,0),vec2(0),u_textureSize-1.)+.5)*texel;
+  vec2 c=(clamp(i+vec2(0,1),vec2(0),u_textureSize-1.)+.5)*texel; vec2 d=(clamp(i+vec2(1),vec2(0),u_textureSize-1.)+.5)*texel;
   return mix(mix(decode(texture(u_image,a).rgb),decode(texture(u_image,b).rgb),f.x),mix(decode(texture(u_image,c).rgb),decode(texture(u_image,d).rgb),f.x),f.y);
 }
 void main(){
   // 自动裁切：旋转后选取能够完全落入原裁切区的最大同画幅矩形。
   // x 轴按像素宽高比校正，保证非正方形照片旋转时保持真实几何比例。
   float cs=cos(u_angle),sn=sin(u_angle),absCs=abs(cs),absSn=abs(sn);
-  float cropAspect=(u_size.x*u_crop.z)/(u_size.y*u_crop.w);
+  float cropAspect=(u_sourceSize.x*u_crop.z)/(u_sourceSize.y*u_crop.w);
   float autoScale=min(cropAspect/(absCs*cropAspect+absSn),1./(absSn*cropAspect+absCs));
   vec2 centered=(v_uv-.5)*autoScale;
   vec2 visual=vec2(centered.x*cropAspect,centered.y);
@@ -111,7 +111,9 @@ export class PhotoRenderer {
   render(state: EditState, width = this.canvas.clientWidth, height = this.canvas.clientHeight, pixelRatio = devicePixelRatio || 1) {
     if (!this.bitmap) return; const gl=this.gl; this.canvas.width=Math.max(1,Math.round(width*pixelRatio)); this.canvas.height=Math.max(1,Math.round(height*pixelRatio)); gl.viewport(0,0,this.canvas.width,this.canvas.height); gl.useProgram(this.program);
     const uniform=(name:string)=>gl.getUniformLocation(this.program,name); const g=state.global;
-    gl.uniform2f(uniform('u_size'),state.sourceWidth,state.sourceHeight); gl.uniform2f(uniform('u_output'),this.canvas.width,this.canvas.height);
+    // 原图尺寸只负责裁切、旋转和蒙版坐标；纹理尺寸只负责像素采样。
+    // 预览纹理可以缩小，逻辑编辑坐标仍与原图完全一致。
+    gl.uniform2f(uniform('u_sourceSize'),state.sourceWidth,state.sourceHeight); gl.uniform2f(uniform('u_textureSize'),this.bitmap.width,this.bitmap.height); gl.uniform2f(uniform('u_output'),this.canvas.width,this.canvas.height);
     gl.uniform1f(uniform('u_exposure'),g.exposureEV); gl.uniform1f(uniform('u_contrast'),g.contrast/100); gl.uniform1f(uniform('u_highlights'),g.highlights/100); gl.uniform1f(uniform('u_shadows'),g.shadows/100); gl.uniform1f(uniform('u_whites'),g.whites/100); gl.uniform1f(uniform('u_blacks'),g.blacks/100); gl.uniform1f(uniform('u_clarity'),g.clarity/100); gl.uniform1f(uniform('u_warmth'),g.warmth/100); gl.uniform1f(uniform('u_tint'),g.tint/100); gl.uniform1f(uniform('u_vibrance'),g.vibrance/100); gl.uniform1f(uniform('u_saturation'),g.saturation/100);
     gl.uniform1f(uniform('u_angle'),state.transform.angleDeg*Math.PI/180); const c=state.transform.crop; gl.uniform4f(uniform('u_crop'),c.x,c.y,c.width,c.height); gl.uniform1i(uniform('u_count'),state.regions.length);
     const regions=new Float32Array(16), locals=new Float32Array(16), meta=new Float32Array(16), brushDabs=new Float32Array(128 * 4); let brushCount=0;
