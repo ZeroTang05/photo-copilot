@@ -775,6 +775,12 @@ canvas {
 }
 .modal button { margin-right: 8px; }
 
+.detail-modal > div { width: min(1100px, calc(100vw - 32px)); }
+.detail-images { display: flex; gap: 16px; overflow: auto; margin: 16px 0; }
+.detail-images figure { margin: 0; min-width: min(512px, calc(100vw - 80px)); }
+.detail-images img { display: block; width: 512px; max-width: 100%; image-rendering: pixelated; background: #111; }
+.detail-images figcaption { margin-top: 6px; color: var(--text-mute); font-size: 12px; }
+
 @media (max-width: 1280px) {
   .content { grid-template-columns: 1fr 296px; }
   .leftStack { grid-template-columns: 92px 1fr; }

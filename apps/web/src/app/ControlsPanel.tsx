@@ -19,6 +19,7 @@ interface ControlsPanelProps {
   onResetCrop: () => void;
   onEditInteractionStart: () => void;
   onEditInteractionEnd: () => void;
+  onShowDetail: () => void;
 }
 
 const aspectOptions: Array<{ value: EditState['transform']['aspectLock']; label: string }> = [
@@ -224,6 +225,15 @@ export function ControlsPanel(props: ControlsPanelProps) {
           disabled={!state || disabled}
           onChange={(value, transient) => props.onGlobalChange('clarity', value, transient)}
         />
+        <Slider
+          label="去雾"
+          value={state?.global.dehaze ?? 0}
+          min={0}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value, transient) => props.onGlobalChange('dehaze', value, transient)}
+        />
       </details>
 
       {/* 色彩 */}
@@ -267,6 +277,32 @@ export function ControlsPanel(props: ControlsPanelProps) {
           disabled={!state || disabled}
           onChange={(value, transient) => props.onGlobalChange('saturation', value, transient)}
         />
+      </details>
+
+      {/* 细节 */}
+      <details open>
+        <summary><Chevron /><span>细节</span></summary>
+        <Slider
+          label="明度降噪"
+          value={state?.global.denoiseLuma ?? 0}
+          min={0}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value, transient) => props.onGlobalChange('denoiseLuma', value, transient)}
+        />
+        <p className="region-hint">减少亮暗颗粒。数值更高时，细小纹理也会更平滑。</p>
+        <Slider
+          label="颜色降噪"
+          value={state?.global.denoiseChroma ?? 0}
+          min={0}
+          max={100}
+          step={1}
+          disabled={!state || disabled}
+          onChange={(value, transient) => props.onGlobalChange('denoiseChroma', value, transient)}
+        />
+        <p className="region-hint">减少暗部的红绿蓝杂点，亮度细节保持独立控制。</p>
+        <button className="region-add-outside" disabled={!state || disabled} onClick={props.onShowDetail}>查看原尺寸细节</button>
       </details>
 
       {/* 局部调整 */}

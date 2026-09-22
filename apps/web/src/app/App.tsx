@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import * as UTIF from 'utif2';
-import { applyChanges, changedSummary, createInitialState, defaultGlobal, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
+import { applyChanges, changedSummary, createInitialState, defaultGlobal, SCHEMA_VERSION, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
 import type { PlanRequest } from '@photo-copilot/ai-contract';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
@@ -9,6 +9,8 @@ import { ThumbnailSidebar } from './ThumbnailSidebar';
 import { ControlsPanel } from './ControlsPanel';
 import { CopilotPanel } from './CopilotPanel';
 import { decodePhotoFile, isSupportedPhotoFile } from '../lib/image-import';
+import { restorationClient } from '../lib/restoration/client';
+import { hasRestoration, type RestorationMode, type RestorationParameters } from '../lib/restoration/types';
 
 function uid() { return crypto.randomUUID(); }
 
@@ -26,6 +28,11 @@ interface ReferencePhoto {
   name: string;
   blob: Blob;
   thumbnail: string;
+}
+
+interface DetailPreview {
+  original: string;
+  processed: string;
 }
 
 // 旋转时取能完全填满当前画幅的最大内接矩形，避免边角复制或拉伸。
@@ -97,6 +104,7 @@ export function App() {
   const rendererRef = useRef<PhotoRenderer | undefined>(undefined);
   const renderedImageIdRef = useRef<string | undefined>(undefined);
   const renderSizeRef = useRef<{ width: number; height: number } | undefined>(undefined);
+  const restorationGenerationRef = useRef(0);
   const currentSlot = useEditor((state) => activeSlot(state));
   const images = useEditor((state) => state.images);
   const activeIndex = useEditor((state) => state.activeIndex);
@@ -127,10 +135,26 @@ export function App() {
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [isComparing, setIsComparing] = useState(false);
+  const [detailPreview, setDetailPreview] = useState<DetailPreview>();
 
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
   const dragDepthRef = useRef(0);
+
+  /** 为 AI 与导出取得原尺寸修复图；零值直接解码原始规范化 Blob。 */
+  const prepareFullBitmap = useCallback(async (slot: NonNullable<typeof currentSlot>, editState: EditState, mode: RestorationMode) => {
+    const parameters: RestorationParameters = {
+      dehaze: editState.global.dehaze,
+      denoiseLuma: editState.global.denoiseLuma,
+      denoiseChroma: editState.global.denoiseChroma,
+    };
+    if (!hasRestoration(parameters)) return createImageBitmap(slot.blob, { imageOrientation: 'from-image' });
+    const generation = ++restorationGenerationRef.current;
+    restorationClient.cancel(generation);
+    const result = await restorationClient.prepare({ imageId: editState.imageId, generation, blob: slot.blob, parameters, mode });
+    return result.bitmap;
+  }, []);
 
   const displayState = useMemo<EditState | undefined>(() => {
     if (!state) return undefined;
@@ -144,16 +168,24 @@ export function App() {
     return state;
   }, [state, candidate, allowComposition]);
 
+  // 对比时使用原始纹理和归零参数，其他时候可显示 AI 候选的预处理结果。
+  const renderState = isComparing && state ? { ...state, global: defaultGlobal(), regions: [] } : displayState;
+  const restorationParameters = useMemo<RestorationParameters>(() => ({
+    dehaze: isComparing ? 0 : displayState?.global.dehaze ?? 0,
+    denoiseLuma: isComparing ? 0 : displayState?.global.denoiseLuma ?? 0,
+    denoiseChroma: isComparing ? 0 : displayState?.global.denoiseChroma ?? 0,
+  }), [displayState?.global.dehaze, displayState?.global.denoiseChroma, displayState?.global.denoiseLuma, isComparing]);
+
   const draw = useCallback(() => {
-    if (!displayState || renderedImageIdRef.current !== displayState.imageId || !rendererRef.current || !canvasRef.current) return;
+    if (!renderState || renderedImageIdRef.current !== renderState.imageId || !rendererRef.current || !canvasRef.current) return;
     const parent = canvasRef.current.parentElement;
     const availableWidth = (parent?.clientWidth ?? 900) * 0.92;
     const availableHeight = (parent?.clientHeight ?? 600) * 0.87;
-    const aspect = (displayState.sourceWidth * displayState.transform.crop.width) / (displayState.sourceHeight * displayState.transform.crop.height);
+    const aspect = (renderState.sourceWidth * renderState.transform.crop.width) / (renderState.sourceHeight * renderState.transform.crop.height);
     const width = Math.min(availableWidth, availableHeight * aspect);
     renderSizeRef.current = { width, height: width / aspect };
-    rendererRef.current.render(displayState, width, width / aspect);
-  }, [displayState]);
+    rendererRef.current.render(renderState, width, width / aspect);
+  }, [renderState]);
 
   useEffect(() => { draw(); }, [draw]);
   // 面板显隐会改变画布可用空间，等浏览器完成本次布局后再按新尺寸重绘。
@@ -181,7 +213,7 @@ export function App() {
   }, [redo, undo]);
 
   // 组件卸载时释放当前的 WebGL 资源；切换图片时由下方效果在新图就绪后替换它。
-  useEffect(() => () => rendererRef.current?.dispose(), []);
+  useEffect(() => () => { rendererRef.current?.dispose(); restorationClient.dispose(); }, []);
 
   // 先在后台解码新图，确认可用后才替换画布。旧图保持原样，避免切换时闪烁。
   useEffect(() => {
@@ -198,7 +230,17 @@ export function App() {
     }
     const imageId = currentSlot.state.imageId;
     let cancelled = false;
-    void createImageBitmap(currentSlot.blob, { imageOrientation: 'from-image' }).then((bitmap) => {
+    const generation = ++restorationGenerationRef.current;
+    restorationClient.cancel(generation);
+    void (async () => {
+      if (hasRestoration(restorationParameters)) {
+        setStatus('正在准备图像处理');
+        return restorationClient.prepare({ imageId, generation, blob: currentSlot.blob, parameters: restorationParameters, mode: 'preview' });
+      }
+      const bitmap = await createImageBitmap(currentSlot.blob, { imageOrientation: 'from-image' });
+      return { imageId, generation, bitmap, width: bitmap.width, height: bitmap.height };
+    })().then((result) => {
+      const { bitmap } = result;
       if (cancelled) { bitmap.close(); return; }
       const previous = rendererRef.current;
       const renderer = new PhotoRenderer(canvas);
@@ -208,23 +250,28 @@ export function App() {
       renderedImageIdRef.current = imageId;
       previous?.dispose();
       draw();
-    }).catch(() => {
-      if (!cancelled) setStatus('图片渲染初始化失败');
+      if (hasRestoration(restorationParameters)) setStatus('图像处理已更新');
+    }).catch((error: unknown) => {
+      if (!cancelled) setStatus(`图像处理失败：${error instanceof Error ? error.message : String(error)}`);
     });
     return () => { cancelled = true; };
-  }, [currentSlot?.blob]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSlot?.blob, currentSlot?.state.imageId, restorationParameters]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 删除照片或离开页面时释放对应的去雾分析系数缓存。
+  useEffect(() => {
+    const imageId = currentSlot?.state.imageId;
+    return () => { if (imageId) restorationClient.releaseImage(imageId); };
+  }, [currentSlot?.state.imageId]);
 
   const handleFit = useCallback(() => { setZoom(100); draw(); }, [draw]);
 
   const handleCompareStart = useCallback(() => {
-    const size = renderSizeRef.current;
-    if (!state || !size || !rendererRef.current) return;
-    rendererRef.current.render({ ...state, global: defaultGlobal(), regions: [] }, size.width, size.height);
+    if (state) setIsComparing(true);
   }, [state]);
 
   const handleCompareEnd = useCallback(() => {
-    draw();
-  }, [draw]);
+    setIsComparing(false);
+  }, []);
 
   const handleImport = async (file: File) => {
     if (!isSupportedPhotoFile(file)) { setStatus('仅支持 JPEG、PNG、WebP、AVIF、GIF、TIFF 或相机 RAW 图片'); return; }
@@ -421,6 +468,32 @@ export function App() {
     commit({ ...state, transform: { ...state.transform, crop: { x: 0, y: 0, width: 1, height: 1 }, aspectLock: 'original' } });
   };
 
+  /** 在照片中央截取 512 像素区域，一像素对应一像素，方便判断噪点与纹理。 */
+  const handleShowDetail = async () => {
+    if (!state || !currentSlot || candidate) return;
+    try {
+      setStatus('正在处理原尺寸细节');
+      const edge = Math.min(512, state.sourceWidth, state.sourceHeight);
+      const left = Math.floor((state.sourceWidth - edge) / 2);
+      const top = Math.floor((state.sourceHeight - edge) / 2);
+      const cropBitmap = async (bitmap: ImageBitmap) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = edge; canvas.height = edge;
+        canvas.getContext('2d')!.drawImage(bitmap, left, top, edge, edge, 0, 0, edge, edge);
+        bitmap.close();
+        return canvas.toDataURL('image/png');
+      };
+      const [original, processed] = await Promise.all([
+        createImageBitmap(currentSlot.blob, { imageOrientation: 'from-image' }).then(cropBitmap),
+        prepareFullBitmap(currentSlot, state, 'detail').then(cropBitmap),
+      ]);
+      setDetailPreview({ original, processed });
+      setStatus('已显示照片中央的原尺寸细节');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '图像处理失败，请查看错误详情');
+    }
+  };
+
   const requestPlan = async (mode: 'auto' | 'followup') => {
     if (!state || !currentSlot || candidate) return;
     if (mode === 'followup' && !instruction.trim()) { setStatus('请输入希望修改的内容'); return; }
@@ -432,9 +505,10 @@ export function App() {
       setStatus('正在生成建议，可继续手动编辑或取消');
       const referencePromise = referencePhoto ? previewFromBlob(referencePhoto.blob, 1024) : undefined;
       const original = await previewFromBlob(currentSlot.blob, 1024);
+      if (hasRestoration({ dehaze: state.global.dehaze, denoiseLuma: state.global.denoiseLuma, denoiseChroma: state.global.denoiseChroma })) setStatus('正在处理原尺寸图片');
       const offscreen = document.createElement('canvas');
       const currentRenderer = new PhotoRenderer(offscreen);
-      await currentRenderer.load(currentSlot.blob);
+      currentRenderer.loadBitmap(await prepareFullBitmap(currentSlot, state, 'export'));
       currentRenderer.render(state, original.width, original.height);
       const current = await previewFromBlob(await currentRenderer.toBlob(0.85), 1024);
       currentRenderer.dispose();
@@ -445,7 +519,7 @@ export function App() {
         reference ? toBase64(reference.blob) : Promise.resolve(undefined),
       ]);
       const payload: PlanRequest = {
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         requestId: uid(),
         imageId: state.imageId,
         baseRevision: state.revision,
@@ -497,9 +571,10 @@ export function App() {
       const crop = state.transform.crop;
       const outW = Math.round(state.sourceWidth * crop.width);
       const outH = Math.round(state.sourceHeight * crop.height);
+      setStatus(hasRestoration({ dehaze: state.global.dehaze, denoiseLuma: state.global.denoiseLuma, denoiseChroma: state.global.denoiseChroma }) ? '正在处理原尺寸图片' : '正在导出图片');
       const offscreen = document.createElement('canvas');
       const output = new PhotoRenderer(offscreen);
-      await output.load(currentSlot.blob);
+      output.loadBitmap(await prepareFullBitmap(currentSlot, state, 'export'));
       output.render(state, outW, outH, 1);
       const selectedFormat = format === 'tiff'
         ? { blob: new Blob([UTIF.encodeImage(output.rgbaPixels(), offscreen.width, offscreen.height)], { type: 'image/tiff' }), extension: 'tiff', label: 'TIFF（无压缩）' }
@@ -625,9 +700,18 @@ export function App() {
           onResetCrop={handleResetCrop}
           onEditInteractionStart={beginInteraction}
           onEditInteractionEnd={endInteraction}
+          onShowDetail={() => void handleShowDetail()}
         />}
       </section>
       {isDraggingFiles && <div className="drop-overlay" aria-live="polite">松开即可导入照片</div>}
+      {detailPreview && <div className="modal detail-modal" role="dialog" aria-modal="true" aria-label="原尺寸细节对比" onClick={() => setDetailPreview(undefined)}>
+        <div onClick={(event) => event.stopPropagation()}>
+          <h2>原尺寸细节</h2>
+          <p>照片中央区域。左侧为原图，右侧为当前处理效果。</p>
+          <div className="detail-images"><figure><img src={detailPreview.original} alt="原图中央细节" /><figcaption>原图</figcaption></figure><figure><img src={detailPreview.processed} alt="处理后中央细节" /><figcaption>处理后</figcaption></figure></div>
+          <button onClick={() => setDetailPreview(undefined)}>关闭</button>
+        </div>
+      </div>}
     </main>
   );
 }
