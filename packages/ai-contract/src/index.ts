@@ -22,7 +22,7 @@ export const SegmentRequestSchema = z.object({
   requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), preview: PreviewSchema, prompt: SegmentPromptSchema,
 }).strict();
 export const SegmentResponseSchema = z.object({
-  status: z.enum(['ok', 'empty']), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), provider: z.literal('hf-gradio'), adapterVersion: z.string(),
+  status: z.enum(['ok', 'empty']), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), provider: z.enum(['hf-gradio', 'modelscope-gradio']), adapterVersion: z.string(),
   inputWidth: z.number().int().positive(), inputHeight: z.number().int().positive(), annotations: z.array(z.object({ index: z.number().int().nonnegative(), label: z.string().max(160), maskUrl: z.string().url(), score: z.null() }).strict()).max(32), durationMs: z.number().int().nonnegative(),
 }).strict();
 export type SegmentIntent = z.infer<typeof SegmentIntentSchema>;

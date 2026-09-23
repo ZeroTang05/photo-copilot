@@ -90,7 +90,11 @@ type SamAnnotatedResult = {
 
 网关共用连接身份时，应用用户会竞争同一上游资源预算，不能把本项目每用户限额等同于 Hugging Face 每用户额度。配置 `SAM_HF_TOKEN` 时只放服务端；没有令牌时使用公共匿名连接。首期不实现用户 Hugging Face 登录。
 
-配置项：`SAM_PROVIDER=hf-gradio`、`SAM_SPACE_URL=https://prithivmlmods-sam3-demo.hf.space`、可选 `SAM_HF_TOKEN`、`SAM_TIMEOUT_MS=75000`。Space 地址由部署配置决定，用户请求无权修改。
+`SAM_HF_TOKEN` 支持逗号分隔多个令牌组成令牌池。上游对当前令牌报额度受限（quota / rate limit / GPU 超限）时自动切换下一个令牌重试，每个令牌试一次，全部用尽才向用户返回额度错误；日志只记录令牌下标，不记录令牌内容。
+
+令牌池全部用尽或 Hugging Face 服务不可用时，可配置 ModelScope 兜底端点（自部署 SAM3 studio，较慢但无限量）。兜底地址必须是 API 专用地址（形如 `https://studio-xxx.api-inference.modelscope.net`），认证使用 ModelScope 访问令牌。ModelScope 返回的 config.root 指向浏览器域名 ms.show（拒绝 SDK token 直连），连接时需改回 API 地址；其蒙版文件下载同样需要认证，浏览器无法直接获取，由服务端代下载后以 data URL 内嵌返回（浏览器最多采用前 8 个选区，只代下载前 8 个蒙版），响应 provider 标记为 `modelscope-gradio`。点选分割依赖的 `/segment_points` 端点兜底提供方未实现，不做兜底。
+
+配置项：`SAM_PROVIDER=hf-gradio`、`SAM_SPACE_URL=https://prithivmlmods-sam3-demo.hf.space`、可选 `SAM_HF_TOKEN`（单个令牌或逗号分隔的令牌池）、`SAM_TIMEOUT_MS=75000`、可选 `SAM_MODELSCOPE_URL` + `SAM_MODELSCOPE_TOKEN`（兜底端点及其访问令牌）、`SAM_MODELSCOPE_TIMEOUT_MS=120000`。Space 地址由部署配置决定，用户请求无权修改。
 
 ## 3. 完整用户流程
 

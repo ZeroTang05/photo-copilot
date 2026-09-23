@@ -18,6 +18,9 @@ interface Env {
   SAM_TIMEOUT_MS?: string;
   SAM_POINT_SEGMENTATION?: string;
   SAM_POINT_ENDPOINT?: string;
+  SAM_MODELSCOPE_URL?: string;
+  SAM_MODELSCOPE_TOKEN?: string;
+  SAM_MODELSCOPE_TIMEOUT_MS?: string;
   AI_QUOTA: DurableObjectNamespace;
   ASSETS: Fetcher;
 }
@@ -34,9 +37,10 @@ const error = (code: string, message: string, retryAfterSeconds: number | null =
 const response = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
 
 /** Cloudflare 与 Vercel 使用相同字段，便于用 requestId 对照两边的运行时日志。 */
-function writeLog(level: 'info' | 'error', event: string, fields: Record<string, unknown>) {
+function writeLog(level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>) {
   const line = JSON.stringify({ timestamp: new Date().toISOString(), service: 'photo-copilot', event, ...fields });
   if (level === 'error') console.error(line);
+  else if (level === 'warn') console.warn(line);
   else console.log(line);
 }
 
@@ -87,14 +91,54 @@ function jpegBytes(base64: string, preview: z.infer<typeof PreviewSchema>) {
   return new Blob([bytes], { type: preview.mime });
 }
 
-/** Cloudflare Worker 与 Node 网关共用官方 Gradio SDK；只调用部署配置的 SAM3 Space。 */
-async function segmentWithSam(env: Env, jpeg: Blob, prompt: z.infer<typeof SegmentPromptSchema>, inputWidth: number, inputHeight: number) {
-  const spaceUrl = env.SAM_SPACE_URL || 'https://prithivmlmods-sam3-demo.hf.space';
-  const timeoutMs = Math.min(Number(env.SAM_TIMEOUT_MS ?? 75_000), 75_000);
+/**
+ * SAM_HF_TOKEN 令牌池：环境变量写成 "hf_aaa,hf_bbb"（英文逗号分隔）即可配置
+ * 多个令牌，留空时匿名连接。samTokenIndex 是进程内指针：当前令牌额度用尽时
+ * 移到下一个令牌重试，并停留在最近可用的令牌上。
+ */
+let samTokenIndex = 0;
+
+/** 解析逗号分隔的令牌列表；任何条目不是 hf_ 开头都视为配置错误。 */
+function parseSamTokens(raw: string | undefined): string[] {
+  const entries = (raw ?? '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const invalidIndex = entries.findIndex((entry) => !entry.startsWith('hf_'));
+  if (invalidIndex >= 0) throw new Error(`SAM_HF_TOKEN 第 ${invalidIndex + 1} 个条目不是 hf_ 开头的令牌`);
+  return entries;
+}
+
+/** 与 Node 网关的额度判定保持一致：quota / GPU 超限 / rate limit 都算额度受限。 */
+const isSamQuotaError = (cause: unknown) => {
+  const text = (cause instanceof Error ? cause.message : String(cause)).toLowerCase();
+  return text.includes('quota') || text.includes('gpu') || text.includes('rate limit');
+};
+
+/** 兜底触发条件：额度受限，或提供方休眠/不可用（与网关 SAM_UNAVAILABLE 分类一致）。 */
+const isSamFallbackEligible = (cause: unknown) => {
+  const text = (cause instanceof Error ? cause.message : String(cause)).toLowerCase();
+  return isSamQuotaError(cause) || text.includes('sleep') || text.includes('unavailable') || text.includes('503');
+};
+
+/**
+ * 连接 Gradio 应用；ModelScope api-inference 域名返回的 config.root 指向浏览器
+ * 域名 ms.show（拒绝 SDK token 直连），需要改回 api 地址并重新拉取接口信息。
+ * Hugging Face Space 的 config.root 与连接地址同源，不做任何改动。
+ */
+async function connectGradio(spaceUrl: string, token: string | undefined) {
+  const client = await Client.connect(spaceUrl, token ? { token: token as `hf_${string}` } : undefined);
+  const config = client.config;
+  if (config?.root && new URL(config.root).origin !== new URL(spaceUrl).origin) {
+    config.root = spaceUrl.replace(/\/+$/, '');
+    config.connect_heartbeat = false;
+    client.api_info = await client.view_api();
+  }
+  return client;
+}
+
+/** 对单个 SAM3 端点执行一次推理；端点地址、令牌、超时由调用方决定。 */
+async function segmentOnce(env: Env, spaceUrl: string, timeoutMs: number, token: string | undefined, jpeg: Blob, prompt: z.infer<typeof SegmentPromptSchema>, inputWidth: number, inputHeight: number) {
   let client: Client | undefined;
   try {
-    client = await Client.connect(spaceUrl, env.SAM_HF_TOKEN?.startsWith('hf_') ? { token: env.SAM_HF_TOKEN as `hf_${string}` } : undefined);
-    if (prompt.kind === 'point' && env.SAM_POINT_SEGMENTATION !== 'true') throw new Error('POINT_SEGMENTATION_UNAVAILABLE');
+    client = await connectGradio(spaceUrl, token);
     const request = prompt.kind === 'text'
       ? client.predict('/run_image_segmentation', { source_img: handle_file(jpeg), text_query: prompt.textQuery, conf_thresh: prompt.confidenceThreshold })
       : client.predict(env.SAM_POINT_ENDPOINT || '/segment_points', { image: handle_file(jpeg), points: prompt.points.map((point) => ({ x: Math.min(inputWidth - 1, Math.floor(point.x * inputWidth)), y: Math.min(inputHeight - 1, Math.floor(point.y * inputHeight)), label: point.label })) });
@@ -105,11 +149,58 @@ async function segmentWithSam(env: Env, jpeg: Blob, prompt: z.infer<typeof Segme
     const raw = Array.isArray(output.data) ? output.data[0] : undefined;
     const parsed = prompt.kind === 'text' ? SamOutputSchema.safeParse(raw) : SamPointOutputSchema.safeParse(raw);
     if (!parsed.success) throw new Error('SAM_OUTPUT_INVALID');
-    const allowedHost = new URL(spaceUrl).host;
-    const annotations = prompt.kind === 'text' ? parsed.data.annotations : [{ image: parsed.data.mask, label: '选区 1' }];
-    for (const annotation of annotations) if (new URL(annotation.image.url).host !== allowedHost) throw new Error('SAM_OUTPUT_INVALID');
-    return annotations;
+    return prompt.kind === 'text' ? parsed.data.annotations : [{ image: parsed.data.mask, label: '选区 1' }];
   } finally { client?.close(); }
+}
+
+/**
+ * HF 令牌池逐个尝试，额度用尽时切换下一个令牌；全部用尽把最后的额度错误
+ * 抛给调用方，由调用方决定是否改走兜底端点。
+ */
+async function segmentWithSam(env: Env, tokens: string[], jpeg: Blob, prompt: z.infer<typeof SegmentPromptSchema>, inputWidth: number, inputHeight: number) {
+  if (prompt.kind === 'point' && env.SAM_POINT_SEGMENTATION !== 'true') throw new Error('POINT_SEGMENTATION_UNAVAILABLE');
+  const spaceUrl = env.SAM_SPACE_URL || 'https://prithivmlmods-sam3-demo.hf.space';
+  const timeoutMs = Math.min(Number(env.SAM_TIMEOUT_MS ?? 75_000), 75_000);
+  const attempts = Math.max(tokens.length, 1);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await segmentOnce(env, spaceUrl, timeoutMs, tokens[samTokenIndex], jpeg, prompt, inputWidth, inputHeight);
+    } catch (cause) {
+      if (!isSamQuotaError(cause)) throw cause;
+      lastError = cause;
+      if (attempt + 1 < attempts) {
+        samTokenIndex = (samTokenIndex + 1) % tokens.length;
+        writeLog('warn', 'sam.token.rotated', { nextIndex: samTokenIndex, poolSize: tokens.length });
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** 分块转换字节为 base64，避免大文件一次性展开参数导致栈溢出。 */
+function base64FromBytes(bytes: Uint8Array) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+/**
+ * 兜底端点的蒙版文件下载需要认证，浏览器拿不到；由 Worker 代下载并内嵌为
+ * data URL 返回。浏览器端最多采用前 8 个选区，因此也只下载前 8 个蒙版。
+ * 只从配置的兜底地址取文件路径，不会访问提供方返回的其他主机。
+ */
+async function inlineFallbackMasks(raw: Array<{ image: { url: string }; label: string }>, fallback: { url: string; token: string; timeoutMs: number }) {
+  return Promise.all(raw.slice(0, 8).map(async (item, index) => {
+    const providerUrl = new URL(item.image.url);
+    const response = await fetch(new URL(providerUrl.pathname + providerUrl.search, fallback.url), {
+      headers: { authorization: `Bearer ${fallback.token}` }, signal: AbortSignal.timeout(fallback.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`FALLBACK_MASK_DOWNLOAD_FAILED_${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) throw new Error('SAM_OUTPUT_INVALID');
+    return { index, label: item.label, maskUrl: `data:image/png;base64,${base64FromBytes(bytes)}` };
+  }));
 }
 
 export class AiQuota extends DurableObject {
@@ -289,17 +380,43 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
       writeLog('error', 'sam.segment.request_invalid', { error: errorLogDetails(cause) });
       return response(error('SEGMENT_REQUEST_INVALID', '分割图片或概念不符合要求'), 400);
     }
+    // 令牌池格式错误属于部署配置问题，直接返回 503 而不是匿名降级。
+    let samTokens: string[];
+    try { samTokens = parseSamTokens(env.SAM_HF_TOKEN); } catch (cause) {
+      writeLog('error', 'sam.segment.configuration_invalid', { error: errorLogDetails(cause) });
+      return response(error('CONFIG_INVALID', cause instanceof Error ? cause.message : 'SAM_HF_TOKEN 配置无效'), 503);
+    }
+    // 最终兜底：HF 令牌额度用尽或服务不可用时改用 ModelScope 等 Gradio 兼容端点；该端点需要认证。
+    const modelscopeUrl = env.SAM_MODELSCOPE_URL?.trim();
+    if (modelscopeUrl && !env.SAM_MODELSCOPE_TOKEN?.trim()) return response(error('CONFIG_INVALID', '配置了 SAM_MODELSCOPE_URL 但缺少 SAM_MODELSCOPE_TOKEN：兜底端点需要认证'), 503);
+    const samModelscope = modelscopeUrl ? { url: modelscopeUrl, token: env.SAM_MODELSCOPE_TOKEN!.trim(), timeoutMs: Number(env.SAM_MODELSCOPE_TIMEOUT_MS ?? 120_000) } : undefined;
     const reserved = await quota(env, { action: 'reserve', sessionId: session.id, requestId: parsed.requestId, ...limits });
     if (!reserved.ok) return response({ ...await reserved.json() as object, requestId: parsed.requestId }, reserved.status, session.cookie ? { 'set-cookie': session.cookie } : undefined);
     const started = Date.now();
     try {
-      const annotations = await segmentWithSam(env, jpeg, parsed.prompt, parsed.preview.width, parsed.preview.height);
-      return response({ status: annotations.length ? 'ok' : 'empty', requestId: parsed.requestId, imageId: parsed.imageId, sourceVersion: parsed.sourceVersion, baseRevision: parsed.baseRevision, provider: 'hf-gradio', adapterVersion: 'gradio-js-2.7.0', inputWidth: parsed.preview.width, inputHeight: parsed.preview.height, annotations: annotations.map((item, index) => ({ index, label: item.label, maskUrl: item.image.url, score: null })), durationMs: Date.now() - started }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+      let annotations: Array<{ index: number; label: string; maskUrl: string }>;
+      let viaFallback = false;
+      try {
+        const raw = await segmentWithSam(env, samTokens, jpeg, parsed.prompt, parsed.preview.width, parsed.preview.height);
+        const allowedHost = new URL(env.SAM_SPACE_URL || 'https://prithivmlmods-sam3-demo.hf.space').host;
+        for (const item of raw) if (new URL(item.image.url).host !== allowedHost) throw new Error('SAM_OUTPUT_INVALID');
+        annotations = raw.map((item, index) => ({ index, label: item.label, maskUrl: item.image.url }));
+      } catch (cause) {
+        // HF 令牌额度用尽或服务不可用时的最终兜底：ModelScope 端点较慢但无限量。
+        // 点选分割依赖 /segment_points 端点，兜底提供方没有实现，不做兜底。
+        if (!isSamFallbackEligible(cause) || !samModelscope || parsed.prompt.kind !== 'text') throw cause;
+        writeLog('warn', 'sam.fallback.started', { requestId: parsed.requestId, fallbackUrl: samModelscope.url });
+        const raw = await segmentOnce(env, samModelscope.url, samModelscope.timeoutMs, samModelscope.token, jpeg, parsed.prompt, parsed.preview.width, parsed.preview.height);
+        annotations = await inlineFallbackMasks(raw, samModelscope);
+        viaFallback = true;
+      }
+      return response({ status: annotations.length ? 'ok' : 'empty', requestId: parsed.requestId, imageId: parsed.imageId, sourceVersion: parsed.sourceVersion, baseRevision: parsed.baseRevision, provider: viaFallback ? 'modelscope-gradio' : 'hf-gradio', adapterVersion: 'gradio-js-2.7.0', inputWidth: parsed.preview.width, inputHeight: parsed.preview.height, annotations: annotations.map((item) => ({ ...item, score: null })), durationMs: Date.now() - started }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
     } catch (cause) {
-      const message = cause instanceof Error && cause.message === 'POINT_SEGMENTATION_UNAVAILABLE' ? '当前 SAM3 提供方未开放点选蒙版接口' : cause instanceof Error && cause.message === 'SAM_TIMEOUT' ? 'SAM3 分割等待超时，请重新请求' : 'SAM3 服务暂时不可用，请稍后再试';
-      const code = cause instanceof Error && cause.message === 'POINT_SEGMENTATION_UNAVAILABLE' ? 'POINT_SEGMENTATION_UNAVAILABLE' : cause instanceof Error && cause.message === 'SAM_TIMEOUT' ? 'SAM_TIMEOUT' : 'SAM_PROVIDER_ERROR';
+      const known = cause instanceof Error ? cause.message : '';
+      const code = known === 'POINT_SEGMENTATION_UNAVAILABLE' ? 'POINT_SEGMENTATION_UNAVAILABLE' : known === 'SAM_TIMEOUT' ? 'SAM_TIMEOUT' : isSamQuotaError(cause) ? 'SAM_QUOTA_EXHAUSTED' : 'SAM_PROVIDER_ERROR';
+      const message = code === 'POINT_SEGMENTATION_UNAVAILABLE' ? '当前 SAM3 提供方未开放点选蒙版接口' : code === 'SAM_TIMEOUT' ? 'SAM3 分割等待超时，请重新请求' : code === 'SAM_QUOTA_EXHAUSTED' ? 'SAM3 当前配额已用完，请稍后再试' : 'SAM3 服务暂时不可用，请稍后再试';
       writeLog('error', 'sam.segment.failed', { requestId: parsed.requestId, imageId: parsed.imageId, code, error: errorLogDetails(cause) });
-      return response({ ...error(code, message), requestId: parsed.requestId }, code === 'SAM_TIMEOUT' ? 504 : 502, session.cookie ? { 'set-cookie': session.cookie } : undefined);
+      return response({ ...error(code, message), requestId: parsed.requestId }, code === 'SAM_TIMEOUT' ? 504 : code === 'SAM_QUOTA_EXHAUSTED' ? 429 : 502, session.cookie ? { 'set-cookie': session.cookie } : undefined);
     }
   }
   if (request.method === 'POST' && url.pathname === '/api/plan') {

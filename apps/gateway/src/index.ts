@@ -7,7 +7,7 @@ import { PlanRequestSchema, PlanResponseSchema, SegmentIntentRequestSchema, Segm
 import { RENDERER_VERSION, validatePlan } from '@photo-copilot/domain';
 import { createProvider, errorLogDetails, resolveProviderKind } from './providers/index.js';
 import { planWithRepair } from './planner.js';
-import { SamProviderError, segmentPointsWithSam3, segmentWithSam3 } from './providers/sam3.js';
+import { SamProviderError, SamTokenPool, inlineFallbackMasks, runWithSamTokens, segmentPointsWithSam3, segmentWithSam3 } from './providers/sam3.js';
 
 const config = {
   provider: resolveProviderKind(process.env.AI_SDK),
@@ -23,13 +23,21 @@ const config = {
   perSessionLimit: Number(process.env.DAILY_AI_ATTEMPT_LIMIT_PER_SESSION ?? 30),
   samProvider: process.env.SAM_PROVIDER ?? 'hf-gradio',
   samSpaceUrl: process.env.SAM_SPACE_URL ?? 'https://prithivmlmods-sam3-demo.hf.space',
-  samToken: process.env.SAM_HF_TOKEN?.trim() || undefined,
+  // SAM_HF_TOKEN 支持逗号分隔多个令牌组成令牌池；构造函数会校验格式，
+  // 配置错误直接在启动时崩溃（fast-fail），避免带病运行。
+  samTokens: new SamTokenPool(process.env.SAM_HF_TOKEN),
   samTimeoutMs: Number(process.env.SAM_TIMEOUT_MS ?? 75_000),
   pointSegmentation: process.env.SAM_POINT_SEGMENTATION === 'true',
   pointEndpoint: process.env.SAM_POINT_ENDPOINT ?? '/segment_points',
   samLimit: Number(process.env.DAILY_SAM_ATTEMPT_LIMIT ?? 60),
   samPerSessionLimit: Number(process.env.DAILY_SAM_ATTEMPT_LIMIT_PER_SESSION ?? 6),
 };
+// 最终兜底：所有 HF 令牌额度用尽或服务不可用时，改用 ModelScope 等 Gradio 兼容
+// 端点（较慢但无限量）。该端点需要认证，配置了地址就必须同时配置令牌。
+const samModelscopeUrl = process.env.SAM_MODELSCOPE_URL?.trim() || undefined;
+const samModelscopeToken = process.env.SAM_MODELSCOPE_TOKEN?.trim() || undefined;
+if (samModelscopeUrl && !samModelscopeToken) throw new Error('配置了 SAM_MODELSCOPE_URL 但缺少 SAM_MODELSCOPE_TOKEN：兜底端点需要认证');
+const samModelscope = samModelscopeUrl && samModelscopeToken ? { url: samModelscopeUrl, token: samModelscopeToken, timeoutMs: Number(process.env.SAM_MODELSCOPE_TIMEOUT_MS ?? 120_000) } : undefined;
 
 const provider = createProvider(config.provider, { apiKey: config.apiKey, baseURL: config.baseURL, model: config.model });
 
@@ -222,18 +230,36 @@ app.post('/api/segment', async (request, reply) => {
   if (parsed.prompt.kind === 'point' && !config.pointSegmentation) return reply.code(503).send({ ...apiError('POINT_SEGMENTATION_UNAVAILABLE', '当前 SAM3 提供方未开放点选蒙版接口'), requestId: parsed.requestId });
   request.log.info({ event: 'sam.segment.started', requestId: parsed.requestId, imageId: parsed.imageId, sourceVersion: parsed.sourceVersion, promptKind: parsed.prompt.kind }, 'SAM segment request started');
   try {
-    const shared = { jpeg: new Blob([new Uint8Array(jpeg)], { type: 'image/jpeg' }), spaceUrl: config.samSpaceUrl, token: config.samToken, timeoutMs: Math.min(config.samTimeoutMs, 75_000) };
-    const result = parsed.prompt.kind === 'text'
-      ? await segmentWithSam3({ ...shared, textQuery: parsed.prompt.textQuery, confidenceThreshold: parsed.prompt.confidenceThreshold })
-      : await segmentPointsWithSam3({ ...shared, endpoint: config.pointEndpoint, points: parsed.prompt.points, inputWidth: parsed.preview.width, inputHeight: parsed.preview.height });
-    const allowedMaskHost = new URL(config.samSpaceUrl).host;
-    for (const annotation of result.annotations) if (new URL(annotation.image.url).host !== allowedMaskHost) {
-      throw new SamProviderError('SAM_OUTPUT_INVALID', 'SAM3 返回了不受信任的蒙版地址');
+    const jpegBlob = new Blob([new Uint8Array(jpeg)], { type: 'image/jpeg' });
+    const shared = { jpeg: jpegBlob, spaceUrl: config.samSpaceUrl, timeoutMs: Math.min(config.samTimeoutMs, 75_000) };
+    let annotations: Array<{ index: number; label: string; maskUrl: string; score: null }>;
+    let viaFallback = false;
+    try {
+      const result = await runWithSamTokens(
+        config.samTokens,
+        (token) => parsed.prompt.kind === 'text'
+          ? segmentWithSam3({ ...shared, token, textQuery: parsed.prompt.textQuery, confidenceThreshold: parsed.prompt.confidenceThreshold })
+          : segmentPointsWithSam3({ ...shared, token, endpoint: config.pointEndpoint, points: parsed.prompt.points, inputWidth: parsed.preview.width, inputHeight: parsed.preview.height }),
+        (nextIndex, poolSize) => request.log.warn({ event: 'sam.token.rotated', nextIndex, poolSize }, 'SAM 令牌额度受限，已切换到下一个令牌'),
+      );
+      const allowedMaskHost = new URL(config.samSpaceUrl).host;
+      for (const annotation of result.annotations) if (new URL(annotation.image.url).host !== allowedMaskHost) {
+        throw new SamProviderError('SAM_OUTPUT_INVALID', 'SAM3 返回了不受信任的蒙版地址');
+      }
+      annotations = result.annotations.map((item, index) => ({ index, label: item.label, maskUrl: item.image.url, score: null }));
+    } catch (error) {
+      // 所有 HF 令牌额度用尽或服务不可用时的最终兜底：ModelScope 端点较慢但
+      // 无限量。点选分割依赖 /segment_points 端点，兜底提供方没有实现，不做兜底。
+      const fallbackEligible = error instanceof SamProviderError && (error.code === 'SAM_QUOTA_EXHAUSTED' || error.code === 'SAM_UNAVAILABLE');
+      if (!fallbackEligible || !samModelscope || parsed.prompt.kind !== 'text') throw error;
+      request.log.warn({ event: 'sam.fallback.started', requestId: parsed.requestId, fallbackUrl: samModelscope.url }, 'HF 令牌额度全部用尽或服务不可用，改用 ModelScope 兜底');
+      const result = await segmentWithSam3({ jpeg: jpegBlob, spaceUrl: samModelscope.url, token: samModelscope.token, textQuery: parsed.prompt.textQuery, confidenceThreshold: parsed.prompt.confidenceThreshold, timeoutMs: samModelscope.timeoutMs });
+      annotations = (await inlineFallbackMasks(result.annotations, samModelscope.url, samModelscope.token, samModelscope.timeoutMs)).map((item) => ({ ...item, score: null }));
+      viaFallback = true;
     }
-    const annotations = result.annotations.map((item, index) => ({ index, label: item.label, maskUrl: item.image.url, score: null }));
     const response = SegmentResponseSchema.parse({
       status: annotations.length ? 'ok' : 'empty', requestId: parsed.requestId, imageId: parsed.imageId, sourceVersion: parsed.sourceVersion, baseRevision: parsed.baseRevision,
-      provider: 'hf-gradio', adapterVersion: 'gradio-js-2.7.0', inputWidth: parsed.preview.width, inputHeight: parsed.preview.height, annotations, durationMs: Date.now() - started,
+      provider: viaFallback ? 'modelscope-gradio' : 'hf-gradio', adapterVersion: 'gradio-js-2.7.0', inputWidth: parsed.preview.width, inputHeight: parsed.preview.height, annotations, durationMs: Date.now() - started,
     });
     request.log.info({ event: 'sam.segment.completed', requestId: parsed.requestId, imageId: parsed.imageId, promptKind: parsed.prompt.kind, count: annotations.length, durationMs: response.durationMs }, 'SAM segment request completed');
     return reply.header('cache-control', 'no-store').send(response);
