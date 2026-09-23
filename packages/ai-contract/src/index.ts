@@ -1,4 +1,4 @@
-import { EditStateSchema, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION } from '@photo-copilot/domain';
+import { EditStateSchema, globalKeys, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION } from '@photo-copilot/domain';
 import { z } from 'zod';
 
 export const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
@@ -28,16 +28,109 @@ export const SegmentResponseSchema = z.object({
 export type SegmentIntent = z.infer<typeof SegmentIntentSchema>;
 export type SegmentRequest = z.infer<typeof SegmentRequestSchema>;
 export type SegmentResponse = z.infer<typeof SegmentResponseSchema>;
+
+/** 所有阶段共享的身份快照；任一编辑输入变化都会使旧工作流结果过期。 */
+export const WorkflowSnapshotSchema = z.object({
+  workflowId: z.uuid(),
+  imageId: z.uuid(),
+  sourceVersion: z.number().int().positive(),
+  baseRevision: z.number().int().nonnegative(),
+  rendererVersion: z.literal(RENDERER_VERSION),
+  capabilityVersion: z.string().trim().min(1).max(120),
+  maskSnapshotId: z.string().trim().min(1).max(2_000),
+  referenceVersion: z.number().int().positive().nullable(),
+  instruction: z.string().trim().min(1).max(1_000),
+  selectedTargetId: z.uuid().nullable(),
+  locks: z.object({
+    globalParameters: z.array(z.enum(globalKeys)).max(globalKeys.length),
+    regionIds: z.array(z.uuid()).max(4),
+    composition: z.boolean(),
+  }).strict(),
+}).strict();
+
+export const WorkflowRouteSchema = z.enum(['quick', 'natural', 'local', 'reference', 'style', 'restoration', 'analyze']);
+export const WorkflowScopeSchema = z.enum(['global', 'selected', 'mixed']);
+export const WorkflowStageSchema = z.enum(['route', 'brief', 'planner', 'review', 'corrector']);
+export const RouteDecisionSchema = z.object({
+  status: z.enum(['ready', 'clarify', 'unsupported']),
+  route: WorkflowRouteSchema,
+  scope: WorkflowScopeSchema,
+  question: z.string().max(120).nullable(),
+  constraints: z.array(z.string().trim().min(1).max(120)).max(8),
+}).strict().superRefine((value, ctx) => {
+  if (value.status === 'ready' && value.question !== null) ctx.addIssue({ code: 'custom', message: 'ready 路由不能包含问题' });
+  if (value.status !== 'ready' && value.question === null) ctx.addIssue({ code: 'custom', message: '澄清或不支持路由必须说明原因' });
+});
+
+const ObservationSchema = z.object({
+  targetId: z.uuid().nullable(),
+  aspect: z.enum(['light', 'color', 'detail', 'atmosphere']),
+  finding: z.string().trim().min(1).max(120),
+  evidenceImageIds: z.array(z.string().trim().min(1).max(120)).max(3),
+  certainty: z.enum(['clear', 'uncertain']),
+}).strict();
+const PrioritySchema = z.object({
+  targetId: z.uuid().nullable(),
+  intent: z.string().trim().min(1).max(100),
+  strength: z.enum(['subtle', 'moderate', 'strong']),
+  successCriterion: z.string().trim().min(1).max(120),
+}).strict();
+const SegmentQuerySchema = z.object({
+  labelZh: z.string().trim().min(1).max(40),
+  textQuery: z.string().trim().min(1).max(80),
+  reuseRegionId: z.uuid().nullable(),
+}).strict();
+export const EditBriefSchema = z.object({
+  status: z.enum(['ready', 'clarify', 'unsupported']),
+  goal: z.string().trim().max(160),
+  observations: z.array(ObservationSchema).max(5),
+  preserve: z.array(z.string().trim().min(1).max(120)).max(5),
+  priorities: z.array(PrioritySchema).max(3),
+  segmentQueries: z.array(SegmentQuerySchema).max(3),
+  uncertainties: z.array(z.string().trim().min(1).max(120)).max(3),
+  message: z.string().trim().min(1).max(200),
+}).strict();
+
+const ReviewCheckSchema = z.object({
+  criterion: z.enum(['goal', 'preservation', 'artifacts', 'scope']),
+  result: z.enum(['pass', 'fail', 'unknown']),
+  evidenceImageIds: z.array(z.string().trim().min(1).max(120)).max(3),
+  finding: z.string().trim().min(1).max(120),
+}).strict();
+const ReviewIssueSchema = z.object({
+  issueId: z.string().trim().min(1).max(80),
+  targetId: z.uuid().nullable(),
+  severity: z.enum(['minor', 'major']),
+  finding: z.string().trim().min(1).max(120),
+  allowedParameterNames: z.array(z.enum(globalKeys)).max(globalKeys.length),
+  desiredDirection: z.string().trim().min(1).max(100),
+}).strict();
+export const ReviewReportSchema = z.object({
+  verdict: z.enum(['pass', 'revise', 'uncertain', 'reject']),
+  checks: z.array(ReviewCheckSchema).max(4),
+  issues: z.array(ReviewIssueSchema).max(3),
+  summary: z.string().trim().min(1).max(160),
+}).strict();
+
+export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
+export type RouteDecision = z.infer<typeof RouteDecisionSchema>;
+export type EditBrief = z.infer<typeof EditBriefSchema>;
+export type ReviewReport = z.infer<typeof ReviewReportSchema>;
+
 export const PlanRequestSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']),
+  workflow: WorkflowSnapshotSchema, stage: z.enum(['planner', 'corrector']), route: WorkflowRouteSchema,
   instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(),
   context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6),
 }).strict().superRefine((request, ctx) => {
   if (request.mode === 'followup' && !request.instruction.trim()) ctx.addIssue({ code: 'custom', message: '追问需要输入文字' });
   if (request.imageId !== request.state.imageId || request.sourceVersion !== request.state.sourceVersion || request.baseRevision !== request.state.revision) ctx.addIssue({ code: 'custom', message: '请求身份与编辑状态不一致' });
+  if (request.workflow.imageId !== request.imageId || request.workflow.sourceVersion !== request.sourceVersion || request.workflow.baseRevision !== request.baseRevision || request.workflow.rendererVersion !== request.state.rendererVersion || request.workflow.instruction !== request.instruction) ctx.addIssue({ code: 'custom', message: '工作流快照与规划请求不一致' });
+  if (request.workflow.selectedTargetId && !request.state.regions.some((region) => region.id === request.workflow.selectedTargetId)) ctx.addIssue({ code: 'custom', message: '选中区域不在当前编辑状态中' });
+  if (request.route === 'local' && !request.workflow.selectedTargetId) ctx.addIssue({ code: 'custom', message: '局部路线需要选中真实区域' });
   if (request.originalPreview.width !== request.currentPreview.width || request.originalPreview.height !== request.currentPreview.height) ctx.addIssue({ code: 'custom', message: '两张分析图尺寸必须一致' });
 });
 export type PlanRequest = z.infer<typeof PlanRequestSchema>;
-export const PlanResponseSchema = z.object({ requestId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), planId: z.uuid(), model: z.string(), promptVersion: z.literal('pc-planner-2'), rendererVersion: z.literal(RENDERER_VERSION), payload: PlanPayloadSchema, usage: z.object({ inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), cachedInputTokens: z.number().int().nullable(), attempts: z.number().int().positive(), durationMs: z.number().int().nonnegative() }).strict() }).strict();
+export const PlanResponseSchema = z.object({ requestId: z.uuid(), workflowId: z.uuid(), imageId: z.uuid(), baseRevision: z.number().int().nonnegative(), planId: z.uuid(), model: z.string(), promptVersion: z.string().min(1).max(120), rendererVersion: z.literal(RENDERER_VERSION), payload: PlanPayloadSchema, usage: z.object({ inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), cachedInputTokens: z.number().int().nullable(), attempts: z.number().int().positive(), durationMs: z.number().int().nonnegative() }).strict() }).strict();
 
 export const planPayloadJsonSchema = z.toJSONSchema(PlanPayloadSchema, { target: 'draft-2020-12' }) as Record<string, unknown>;

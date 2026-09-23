@@ -15,6 +15,10 @@ interface PlannerOptions {
   requestId: string;
   /** 端到端截止时间，给路由层的响应序列化和日志预留余量。 */
   deadlineAt: number;
+  /** 格式修复沿用原始工作流边界，只替换本次模型的系统提示。 */
+  buildRepairInstructions?: (invalidOutput: string, error: unknown) => string;
+  /** 工作流范围、锁定项等业务约束在领域校验后立即拒绝。 */
+  validatePayload?: (payload: PlanPayload) => void;
 }
 
 const errorMessage = (err: unknown) => err instanceof Error ? err.message : 'unknown';
@@ -82,7 +86,7 @@ const removeUnauthorizedComposition = (payload: PlanPayload, allowComposition: b
 };
 
 const buildRepairText = (userText: string, previousOutput: string, error: unknown): string =>
-  `${userText}\n\n[修复请求] 你之前的提交未通过校验。请只修正以下工具参数中指出的问题，保留其他有效内容。\n[上次工具参数]\n${previousOutput}\n[校验错误]\n${errorMessage(error)}\n请重新调用 submit_edit_plan 工具，严格匹配 input_schema。`;
+  `${userText}\n\n[上次对象]\n${previousOutput}\n[校验错误]\n${errorMessage(error)}`;
 
 const addUsage = (left: number | null, right: number | null) => left === null && right === null ? null : (left ?? 0) + (right ?? 0);
 
@@ -134,6 +138,7 @@ export async function planWithRepair(
     try {
       const payload = removeUnauthorizedComposition(parseResult(result), options.allowComposition);
       validatePlan(options.state, payload, options.allowComposition);
+      options.validatePayload?.(payload);
       return { payload, result: { ...result, usage }, attempts: attempt + 1 };
     } catch (err) {
       lastError = err;
@@ -147,7 +152,11 @@ export async function planWithRepair(
         modelOutput: result.rawText,
       }, 'planner attempt failed');
       if (attempt === 1) break;
-      callInput = { ...input, userText: buildRepairText(input.userText, result.rawText, err) };
+      callInput = {
+        ...input,
+        instructions: options.buildRepairInstructions?.(result.rawText, err) ?? input.instructions,
+        userText: buildRepairText(input.userText, result.rawText, err),
+      };
     }
   }
 

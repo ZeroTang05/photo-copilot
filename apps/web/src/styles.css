@@ -336,6 +336,13 @@ canvas {
 }
 
 .brush-canvas { cursor: crosshair; }
+.mask-outline { position: absolute; z-index: 2; pointer-events: none; overflow: visible; }
+.mask-outline-shadow, .mask-outline-line, .mask-outline-guide { fill: none; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.mask-outline-shadow { stroke: #111b; stroke-width: 5px; }
+.mask-outline-line { stroke: #ffe28a; stroke-width: 2px; }
+.mask-outline-guide { stroke: #ffe28a; stroke-width: 1px; stroke-dasharray: 5 5; opacity: .9; }
+.mask-outline-label-bg { fill: #171c20e8; stroke: #ffe28a; stroke-width: .002; }
+.mask-outline-label { fill: #fff4c7; font-family: system-ui, sans-serif; dominant-baseline: middle; }
 
 /* ============ Right controls panel ============ */
 
@@ -511,6 +518,7 @@ canvas {
 .crop-reset, .brush-paint { width: 100%; justify-content: center; padding: 6px 8px; font-size: 12px; }
 
 .region-editor { margin: 12px 0; padding: 12px 0 2px; border-top: 1px solid var(--border); }
+.region-editor-active { border-top-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); padding-left: 8px; }
 .region-editor-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
 .region-editor-head input { min-width: 0; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-elev); }
 .region-delete, .region-add-outside { justify-content: center; padding: 5px 8px; font-size: 12px; color: var(--text-mute); }

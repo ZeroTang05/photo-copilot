@@ -12,6 +12,8 @@ interface ControlsPanelProps {
   onAspectLockChange: (value: EditState['transform']['aspectLock']) => void;
   onAddRegion: (shape?: Region['shape'], mode?: Region['mode']) => void;
   regionCount: number;
+  activeRegionId?: string;
+  onActivateRegion: (regionId: string) => void;
   samCandidates: Array<{ candidateId: string; displayLabel: string; areaRatio: number }>;
   onApplySamCandidate: (candidateId: string) => void;
   onUpdateRegion: (region: Region, transient?: boolean) => void;
@@ -41,13 +43,13 @@ const Chevron = () => (
   </svg>
 );
 
-function RegionEditor({ region, disabled, onUpdate, onDelete, activeBrushRegionId, onPaintBrush, activeRasterPaint, onPaintRaster }: { region: Region; disabled: boolean; onUpdate: (next: Region, transient?: boolean) => void; onDelete: () => void; activeBrushRegionId?: string; onPaintBrush: (regionId?: string) => void; activeRasterPaint?: { regionId: string; operation: 'add' | 'erase' }; onPaintRaster: (regionId?: string, operation?: 'add' | 'erase') => void }) {
+function RegionEditor({ region, active, disabled, onActivate, onUpdate, onDelete, activeBrushRegionId, onPaintBrush, activeRasterPaint, onPaintRaster }: { region: Region; active: boolean; disabled: boolean; onActivate: () => void; onUpdate: (next: Region, transient?: boolean) => void; onDelete: () => void; activeBrushRegionId?: string; onPaintBrush: (regionId?: string) => void; activeRasterPaint?: { regionId: string; operation: 'add' | 'erase' }; onPaintRaster: (regionId?: string, operation?: 'add' | 'erase') => void }) {
   const change = (patch: Record<string, unknown>, transient?: boolean) => onUpdate({ ...region, ...patch } as Region, transient);
   const adjustment = (key: keyof Region['adjustments'], value: number, transient?: boolean) => onUpdate({ ...region, adjustments: { ...region.adjustments, [key]: value } }, transient);
   const isBrush = region.shape === 'brush';
   const isLinear = region.shape === 'linear';
   const isRaster = region.shape === 'raster';
-  return <div className="region-editor">
+  return <div className={`region-editor${active ? ' region-editor-active' : ''}`} onFocusCapture={onActivate} onPointerDown={onActivate}>
     <div className="region-editor-head">
       <input aria-label="区域名称" value={region.label} disabled={disabled} maxLength={40} onChange={(event) => change({ label: event.target.value })} />
       <button className="region-delete" disabled={disabled} onClick={onDelete}>删除</button>
@@ -338,7 +340,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
             使用「{candidate.displayLabel}」（覆盖 {Math.round(candidate.areaRatio * 100)}%）
           </button>)}
         </div>}
-        {state?.regions.map((region) => <RegionEditor key={region.id} region={region} disabled={disabled} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} activeBrushRegionId={props.activeBrushRegionId} onPaintBrush={props.onPaintBrush} activeRasterPaint={props.activeRasterPaint} onPaintRaster={props.onPaintRaster} />)}
+        {state?.regions.map((region) => <RegionEditor key={region.id} region={region} active={props.activeRegionId === region.id} disabled={disabled} onActivate={() => props.onActivateRegion(region.id)} onUpdate={props.onUpdateRegion} onDelete={() => props.onDeleteRegion(region.id)} activeBrushRegionId={props.activeBrushRegionId} onPaintBrush={props.onPaintBrush} activeRasterPaint={props.activeRasterPaint} onPaintRaster={props.onPaintRaster} />)}
         {regionCount === 0 && <p className="region-hint">使用椭圆、线性渐变或画笔蒙版，独立调整局部光线与颜色。</p>}
         <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('ellipse', 'outside')}>添加椭圆外径向蒙版</button>
         <button className="region-add-outside" disabled={!state || disabled || regionCount >= 4} onClick={() => props.onAddRegion('linear')}>添加线性渐变</button>

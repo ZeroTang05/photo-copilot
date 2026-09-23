@@ -25,6 +25,8 @@ Photo Copilot 面向摄影爱好者，提供浏览器内的参数式修图。照
 | [去雾与降噪实现计划](DEHAZE-DENOISE-PLAN.md) | 浏览器算法、接入位置、任务顺序与验收标准 |
 | [SAM 3 调研](SAM3-MASK-RESEARCH.md) | 自由蒙版映射、浏览器运行证据与已选云端提供方 |
 | [SAM 3 接入实施文档](SAM3-INTEGRATION-SPEC.md) | Gradio 接口、像素蒙版、LLM 区域输入与完整开发任务 |
+| [分层调色工作流](AI-COLOR-WORKFLOW-V2.md) | 场景路由、诊断、真实预览检查、调用预算与评测 |
+| [分阶段调色提示词](AI-COLOR-PROMPTS-V2.md) | 各阶段完整模板、场景补充规则与示例设计 |
 
 ## 文档权威边界
 

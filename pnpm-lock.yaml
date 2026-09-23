@@ -38,6 +38,9 @@ importers:
       '@photo-copilot/ai-contract':
         specifier: workspace:*
         version: link:../../packages/ai-contract
+      '@photo-copilot/ai-prompts':
+        specifier: workspace:*
+        version: link:../../packages/ai-prompts
       '@photo-copilot/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -63,6 +66,9 @@ importers:
       '@photo-copilot/ai-contract':
         specifier: workspace:*
         version: link:../../packages/ai-contract
+      '@photo-copilot/ai-prompts':
+        specifier: workspace:*
+        version: link:../../packages/ai-prompts
       '@photo-copilot/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -106,6 +112,12 @@ importers:
       zod:
         specifier: 4.1.5
         version: 4.1.5
+
+  packages/ai-prompts:
+    dependencies:
+      '@photo-copilot/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/domain:
     dependencies:

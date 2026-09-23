@@ -10,6 +10,7 @@
   "dependencies": {
     "@colorhythm/libraw-wasm": "1.1.1",
     "@photo-copilot/ai-contract": "workspace:*",
+    "@photo-copilot/ai-prompts": "workspace:*",
     "@photo-copilot/domain": "workspace:*",
     "@photo-copilot/renderer": "workspace:*",
     "@techstark/opencv-js": "5.0.0-release.1",

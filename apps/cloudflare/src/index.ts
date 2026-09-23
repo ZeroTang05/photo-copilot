@@ -1,7 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from '../node_modules/zod/index.js';
 import { Client, handle_file } from '@gradio/client';
-import { EditStateSchema, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION, validatePlan } from '../../../packages/domain/src/index';
+import { PlanPayloadSchema, RENDERER_VERSION, validatePlan } from '../../../packages/domain/src/index';
+import { PlanRequestSchema as SharedPlanRequestSchema, planPayloadJsonSchema } from '../../../packages/ai-contract/src/index';
+import { buildPlannerPrompt, promptVersions } from '../../../packages/ai-prompts/src/index';
 
 interface Env {
   AI_SDK?: 'openai' | 'anthropic';
@@ -31,7 +33,6 @@ const SegmentPromptSchema = z.discriminatedUnion('kind', [z.object({ kind: z.lit
 const SegmentRequestSchema = z.object({ requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), preview: PreviewSchema, prompt: SegmentPromptSchema }).strict();
 const SamOutputSchema = z.object({ image: z.object({ url: z.string().url() }).passthrough(), annotations: z.array(z.object({ image: z.object({ url: z.string().url() }).passthrough(), label: z.string() }).passthrough()) }).passthrough();
 const SamPointOutputSchema = z.object({ inputWidth: z.number().int().positive(), inputHeight: z.number().int().positive(), encoding: z.enum(['gray8', 'rgba-alpha']), mask: z.object({ url: z.string().url() }).passthrough() }).passthrough();
-const PlanRequestSchema = z.object({ schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']), instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(), context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6) }).strict().superRefine((value, ctx) => { if (value.sourceVersion !== value.state.sourceVersion || value.baseRevision !== value.state.revision || value.imageId !== value.state.imageId) ctx.addIssue({ code: 'custom', message: '请求身份与编辑状态不一致' }); });
 const today = () => new Date().toISOString().slice(0, 10);
 const error = (code: string, message: string, retryAfterSeconds: number | null = null) => ({ code, message, retryAfterSeconds });
 const response = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
@@ -238,6 +239,26 @@ function removeUnauthorizedComposition(payload: z.infer<typeof PlanPayloadSchema
   return { ...payload, status: 'clarify' as const, message: '当前没有授权 AI 调整构图，因此未生成可应用的调色修改。', changes: null, reasons: [], limitations: [...payload.limitations, '构图调整已忽略。'].slice(0, 3) };
 }
 
+/** Worker 与本地网关使用同样的范围规则，局部请求无法被模型扩展成整图修改。 */
+function validateWorkflowScope(request: ReturnType<typeof SharedPlanRequestSchema.parse>, payload: z.infer<typeof PlanPayloadSchema>) {
+  if (payload.status !== 'plan' || !payload.changes) return;
+  const { changes } = payload;
+  const { selectedTargetId, locks } = request.workflow;
+  if (changes.globalAssignments.some((assignment) => locks.globalParameters.includes(assignment.parameter))) throw new Error('计划修改了已锁定的全局参数');
+  if (changes.transform && locks.composition) throw new Error('计划修改了已锁定的构图');
+  if (changes.regionUpserts.some((region) => locks.regionIds.includes(region.id)) || changes.regionDeletes.some((id) => locks.regionIds.includes(id))) throw new Error('计划修改了已锁定的局部区域');
+  if (request.route !== 'local') return;
+  if (!selectedTargetId) throw new Error('局部路线缺少选中区域');
+  if (changes.globalAssignments.length || changes.transform || changes.regionDeletes.length || changes.regionUpserts.some((region) => region.id !== selectedTargetId)) throw new Error('局部路线超出了选中区域的作用范围');
+  const before = request.state.regions.find((region) => region.id === selectedTargetId);
+  const after = changes.regionUpserts[0];
+  if (after && before) {
+    const { adjustments: _beforeAdjustments, ...beforeMask } = before;
+    const { adjustments: _afterAdjustments, ...afterMask } = after;
+    if (JSON.stringify(beforeMask) !== JSON.stringify(afterMask)) throw new Error('局部路线不能修改已有蒙版定义');
+  }
+}
+
 /** 将 Anthropic 兼容接口偶发返回的空字符串数组修正为真正的空数组。 */
 function normalizeEmptyArray(value: unknown): unknown {
   if (Array.isArray(value)) return value;
@@ -275,7 +296,7 @@ const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message 
 
 async function requestPlanFromProvider(
   env: Env,
-  request: ReturnType<typeof PlanRequestSchema.parse>,
+  request: ReturnType<typeof SharedPlanRequestSchema.parse>,
   requestId: string,
   instructions: string,
   userText: string,
@@ -330,9 +351,29 @@ async function requestPlanFromProvider(
   return { raw, model: String(body.model), usage: body.usage ?? {}, durationMs: Date.now() - startedAt };
 }
 
-async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse>, requestId: string) {
-  const instructions = '你是照片编辑规划器。输出 JSON。status 为 plan、clarify 或 unsupported。plan 必须有 changes。全局参数只能使用 exposureEV、contrast、highlights、shadows、whites、blacks、clarity、dehaze、denoiseLuma、denoiseChroma、warmth、tint、vibrance、saturation。exposureEV 范围 -2 到 2；dehaze、denoiseLuma、denoiseChroma 为 0 到 100 的整数；其余范围 -100 到 100。value 为绝对值。去雾减轻可见雾气，降噪减弱颗粒并可能平滑纹理；初次自动建议保持保守。每项修改必须有 reasons。构图未授权时 transform 为 null。所有数组字段（包括 regionDeletes、brushDabs）即使为空也必须返回 []，禁止返回空字符串。只要存在任意变更，reasons 必须为每个变更目标给出对应解释。图片顺序：第一张原始照片，第二张当前编辑效果，存在第三张时是参考图；仅参考其色彩、明暗、对比与整体氛围，应用到第二张照片，不可复制主体、物体或构图。';
-  const initial = JSON.stringify({ ...request, originalPreview: { ...request.originalPreview, base64: 'omitted' }, currentPreview: { ...request.currentPreview, base64: 'omitted' }, ...(request.referencePreview ? { referencePreview: { ...request.referencePreview, base64: 'omitted' } } : {}) });
+/** 图片位置由清单定义，避免不同模型把“第几张图”误当成固定角色。 */
+function planStageInput(request: ReturnType<typeof SharedPlanRequestSchema.parse>) {
+  const target = request.workflow.selectedTargetId ? request.state.regions.find((region) => region.id === request.workflow.selectedTargetId) : undefined;
+  return JSON.stringify({
+    workflow: request.workflow,
+    route: request.route,
+    stage: request.stage,
+    imageManifest: [
+      { id: 'original', role: 'before', width: request.originalPreview.width, height: request.originalPreview.height },
+      { id: 'current', role: 'current', width: request.currentPreview.width, height: request.currentPreview.height },
+      ...(request.referencePreview ? [{ id: 'reference', role: 'reference', width: request.referencePreview.width, height: request.referencePreview.height }] : []),
+    ],
+    currentState: request.state,
+    allowedTargetIds: request.route === 'local' && target ? [target.id] : request.state.regions.map((region) => region.id),
+    selectedTarget: target ?? null,
+    allowComposition: request.allowComposition,
+    history: request.context,
+  });
+}
+
+async function plan(env: Env, request: ReturnType<typeof SharedPlanRequestSchema.parse>, requestId: string) {
+  const initial = planStageInput(request);
+  let instructions = buildPlannerPrompt({ route: request.route, outputSchema: JSON.stringify(planPayloadJsonSchema), stageInput: initial });
   let userText = initial;
   let totalUsage: Record<string, unknown> = {};
   let lastError: unknown;
@@ -343,6 +384,7 @@ async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse
     try {
       const payload = removeUnauthorizedComposition(PlanPayloadSchema.parse(normalizeModelPayload(JSON.parse(stripMarkdownFences(output.raw)))), request.allowComposition);
       validatePlan(request.state, payload, request.allowComposition);
+      validateWorkflowScope(request, payload);
       return { payload, model: output.model, usage: totalUsage, attempts: attempt };
     } catch (cause) {
       lastError = cause;
@@ -356,7 +398,14 @@ async function plan(env: Env, request: ReturnType<typeof PlanRequestSchema.parse
         error: errorLogDetails(cause),
       });
       if (attempt === 2) break;
-      userText = `${initial}\n\n[修复请求] 你之前的输出未通过校验。请只修正下面原输出中指出的问题，保留其他有效内容。\n[上次输出]\n${output.raw}\n[校验错误]\n${errorMessage(cause)}\n请重新输出完整 JSON。`;
+      userText = `${initial}\n\n[上次对象]\n${output.raw}\n[校验错误]\n${errorMessage(cause)}`;
+      instructions = buildPlannerPrompt({
+        route: request.route,
+        outputSchema: JSON.stringify(planPayloadJsonSchema),
+        stageInput: initial,
+        invalidOutput: output.raw,
+        errorList: errorMessage(cause),
+      });
     }
   }
   throw lastError;
@@ -428,7 +477,7 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
       writeLog('error', 'ai.plan.configuration_missing', { missing: 'AI_API_KEY' });
       return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用，本地编辑仍可继续'), 503);
     }
-    let parsed; try { parsed = PlanRequestSchema.parse(await request.json()); } catch (cause) {
+    let parsed; try { parsed = SharedPlanRequestSchema.parse(await request.json()); } catch (cause) {
       writeLog('error', 'ai.plan.request_invalid', { error: errorLogDetails(cause) });
       return response(error('REQUEST_INVALID', '请求内容不符合编辑协议'), 400);
     }
@@ -448,6 +497,11 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
       imageId: parsed.imageId,
       baseRevision: parsed.baseRevision,
       mode: parsed.mode,
+      workflowId: parsed.workflow.workflowId,
+      workflowStage: parsed.stage,
+      route: parsed.route,
+      promptVersion: promptVersions.planner,
+      capabilityVersion: parsed.workflow.capabilityVersion,
       provider: env.AI_SDK === 'anthropic' ? 'anthropic' : 'openai',
       model: env.AI_MODEL,
       allowComposition: parsed.allowComposition,
@@ -465,12 +519,17 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
         imageId: parsed.imageId,
         provider: env.AI_SDK === 'anthropic' ? 'anthropic' : 'openai',
         model: output.model,
+        workflowId: parsed.workflow.workflowId,
+        workflowStage: parsed.stage,
+        route: parsed.route,
+        promptVersion: promptVersions.planner,
+        capabilityVersion: parsed.workflow.capabilityVersion,
         durationMs: Date.now() - started,
         attempts: output.attempts,
         usage: output.usage,
         planOutput: output.payload,
       });
-      return response({ requestId: parsed.requestId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: 'pc-planner-2', rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+      return response({ requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: promptVersions.planner, rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
     } catch (cause) {
       writeLog('error', 'ai.plan.failed', {
         requestId: parsed.requestId,

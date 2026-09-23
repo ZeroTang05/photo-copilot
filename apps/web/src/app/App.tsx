@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import * as UTIF from 'utif2';
 import { applyChanges, changedSummary, createInitialState, defaultGlobal, SCHEMA_VERSION, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
 import type { PlanRequest, SegmentIntent, SegmentResponse } from '@photo-copilot/ai-contract';
+import { CAPABILITY_VERSION, type WorkflowRoute } from '@photo-copilot/ai-prompts';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
 import { TopBar, type ExportFormat } from './TopBar';
 import { ThumbnailSidebar } from './ThumbnailSidebar';
 import { ControlsPanel } from './ControlsPanel';
 import { CopilotPanel } from './CopilotPanel';
+import { MaskOutline } from './MaskOutline';
 import { decodePhotoFile, isSupportedPhotoFile } from '../lib/image-import';
 import { restorationClient } from '../lib/restoration/client';
 import { hasRestoration, type RestorationMode, type RestorationParameters } from '../lib/restoration/types';
@@ -29,6 +31,7 @@ interface ReferencePhoto {
   name: string;
   blob: Blob;
   thumbnail: string;
+  version: number;
 }
 
 interface DetailPreview {
@@ -113,6 +116,24 @@ async function toBase64(blob: Blob): Promise<string> {
   });
 }
 
+/** 快照包含所有可影响候选结果的蒙版定义，手工绘制后旧响应会被丢弃。 */
+function maskSnapshotId(regions: Region[]) {
+  const value = regions.map((region) => JSON.stringify(region)).join('|') || 'no-regions';
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `regions-${(hash >>> 0).toString(16)}`;
+}
+
+/** UI 已明确的入口决定路线，避免每次编辑额外消耗一次模型分类调用。 */
+function selectWorkflowRoute(input: { mode: 'auto' | 'followup'; hasReference: boolean; selectedTargetId?: string }): WorkflowRoute {
+  if (input.hasReference) return 'reference';
+  if (input.mode === 'auto') return 'natural';
+  return input.selectedTargetId ? 'local' : 'quick';
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<PhotoRenderer | undefined>(undefined);
@@ -141,12 +162,15 @@ export function App() {
   const [status, setStatus] = useState('导入一张图片开始编辑');
   const [instruction, setInstruction] = useState('');
   const [referencePhoto, setReferencePhoto] = useState<ReferencePhoto>();
+  const referenceVersionRef = useRef(0);
   const [allowComposition, setAllowComposition] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [activeBrushRegionId, setActiveBrushRegionId] = useState<string>();
   const [activeRasterPaint, setActiveRasterPaint] = useState<{ regionId: string; operation: 'add' | 'erase' }>();
+  const [activeRegionId, setActiveRegionId] = useState<string>();
+  const [canvasBounds, setCanvasBounds] = useState<{ left: number; top: number; width: number; height: number }>();
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -155,6 +179,18 @@ export function App() {
   const [detailPreview, setDetailPreview] = useState<DetailPreview>();
   const [samCandidates, setSamCandidates] = useState<SamCandidate[]>([]);
   const [pointSegmentationSupported, setPointSegmentationSupported] = useState(false);
+  const workflowSignature = useMemo(() => JSON.stringify({
+    imageId: state?.imageId,
+    sourceVersion: state?.sourceVersion,
+    revision: state?.revision,
+    masks: state ? maskSnapshotId(state.regions) : '',
+    instruction,
+    selectedTargetId: activeRegionId ?? null,
+    referenceVersion: referencePhoto?.version ?? null,
+    allowComposition,
+  }), [activeRegionId, allowComposition, instruction, referencePhoto?.version, state]);
+  const workflowSignatureRef = useRef(workflowSignature);
+  useEffect(() => { workflowSignatureRef.current = workflowSignature; }, [workflowSignature]);
   const [pointSelectionActive, setPointSelectionActive] = useState(false);
   const [pointDraft, setPointDraft] = useState<Array<{ x: number; y: number; label: 0 | 1 }>>([]);
 
@@ -163,6 +199,27 @@ export function App() {
   const brushStrokeRef = useRef<{ regionId: string; dabs: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
   const rasterStrokeRef = useRef<{ regionId: string; operation: 'add' | 'erase'; points: Array<{ x: number; y: number }>; last?: { x: number; y: number } } | undefined>(undefined);
   const dragDepthRef = useRef(0);
+
+  /** 同步 WebGL 画布的实际显示位置，让 SVG 边界精确盖在缩放后的照片上。 */
+  const syncCanvasBounds = useCallback(() => {
+    const canvas = canvasRef.current;
+    const parent = canvas?.parentElement;
+    if (!canvas || !parent) return;
+    const rect = canvas.getBoundingClientRect();
+    const parentRect = parent.getBoundingClientRect();
+    const next = { left: rect.left - parentRect.left, top: rect.top - parentRect.top, width: rect.width, height: rect.height };
+    setCanvasBounds((previous) => previous && Math.abs(previous.left - next.left) < .5 && Math.abs(previous.top - next.top) < .5 && Math.abs(previous.width - next.width) < .5 && Math.abs(previous.height - next.height) < .5 ? previous : next);
+  }, []);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const parent = canvas?.parentElement;
+    if (!canvas || !parent) return;
+    const frame = requestAnimationFrame(syncCanvasBounds);
+    const observer = new ResizeObserver(syncCanvasBounds);
+    observer.observe(canvas); observer.observe(parent);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [syncCanvasBounds, zoom, state?.imageId, state?.revision, leftPanelOpen, rightPanelOpen, bottomPanelOpen]);
 
   /** 为 AI 与导出取得原尺寸修复图；零值直接解码原始规范化 Blob。 */
   const prepareFullBitmap = useCallback(async (slot: NonNullable<typeof currentSlot>, editState: EditState, mode: RestorationMode) => {
@@ -192,6 +249,13 @@ export function App() {
 
   // 对比时使用原始纹理和归零参数，其他时候可显示 AI 候选的预处理结果。
   const renderState = isComparing && state ? { ...state, global: defaultGlobal(), regions: [] } : displayState;
+  const activeRegion = state?.regions.find((region) => region.id === activeRegionId);
+  const activeRaster = activeRegion?.shape === 'raster' ? activeRegion : undefined;
+  const activeRasterBounds = useMemo(() => {
+    if (!activeRaster) return undefined;
+    const asset = maskStoreRef.current.get(activeRaster.maskRef);
+    return maskMetrics(asset.width, asset.height, asset.pixels).bbox;
+  }, [activeRaster?.maskRef.assetId, activeRaster?.maskRef.version]);
   const restorationParameters = useMemo<RestorationParameters>(() => ({
     dehaze: isComparing ? 0 : displayState?.global.dehaze ?? 0,
     denoiseLuma: isComparing ? 0 : displayState?.global.denoiseLuma ?? 0,
@@ -352,7 +416,7 @@ export function App() {
       }
       const blob = await normalizedBlob(decoded);
       const thumbnail = await thumbnailFromBlob(blob, 160);
-      setReferencePhoto({ name: file.name, blob, thumbnail });
+      setReferencePhoto({ name: file.name, blob, thumbnail, version: ++referenceVersionRef.current });
       setCandidate();
       setStatus('参考图已添加。AI 会参考它的色彩与氛围');
     } catch (error) {
@@ -428,11 +492,13 @@ export function App() {
       adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
     } as Region;
     commit({ ...state, regions: [...state.regions, region] });
+    setActiveRegionId(region.id);
     if (shape === 'brush') setActiveBrushRegionId(region.id);
   };
 
   const handleUpdateRegion = (nextRegion: Region, transient = false) => {
     if (!state || candidate) return;
+    setActiveRegionId(nextRegion.id);
     const next = { ...state, regions: state.regions.map((region) => region.id === nextRegion.id ? nextRegion : region) };
     if (transient) preview(next);
     else commit(next);
@@ -442,6 +508,7 @@ export function App() {
   const handleDeleteRegion = (regionId: string) => {
     if (!state || candidate) return;
     commit({ ...state, regions: state.regions.filter((region) => region.id !== regionId) });
+    if (activeRegionId === regionId) setActiveRegionId(undefined);
     if (activeBrushRegionId === regionId) setActiveBrushRegionId(undefined);
   };
 
@@ -564,6 +631,7 @@ export function App() {
     if (!state || !currentSlot || candidate) return;
     if (mode === 'followup' && !instruction.trim()) { setStatus('请输入希望修改的内容'); return; }
     try {
+      const requestSignature = workflowSignature;
       controllerRef.current?.abort();
       const signal = new AbortController();
       controllerRef.current = signal;
@@ -585,6 +653,9 @@ export function App() {
         toBase64(current.blob),
         reference ? toBase64(reference.blob) : Promise.resolve(undefined),
       ]);
+      const textInstruction = mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim();
+      const selectedTargetId = activeRegionId && state.regions.some((region) => region.id === activeRegionId) ? activeRegionId : null;
+      const route = selectWorkflowRoute({ mode, hasReference: Boolean(reference), selectedTargetId: selectedTargetId ?? undefined });
       const payload: PlanRequest = {
         schemaVersion: SCHEMA_VERSION,
         requestId: uid(),
@@ -592,7 +663,22 @@ export function App() {
         sourceVersion: state.sourceVersion,
         baseRevision: state.revision,
         mode,
-        instruction: mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim(),
+        workflow: {
+          workflowId: uid(),
+          imageId: state.imageId,
+          sourceVersion: state.sourceVersion,
+          baseRevision: state.revision,
+          rendererVersion: state.rendererVersion,
+          capabilityVersion: CAPABILITY_VERSION,
+          maskSnapshotId: maskSnapshotId(state.regions),
+          referenceVersion: referencePhoto?.version ?? null,
+          instruction: textInstruction,
+          selectedTargetId,
+          locks: { globalParameters: [], regionIds: [], composition: !allowComposition },
+        },
+        stage: 'planner',
+        route,
+        instruction: textInstruction,
         state,
         allowComposition,
         originalPreview: { mime: 'image/jpeg', width: original.width, height: original.height, base64: originalBase64 },
@@ -606,7 +692,7 @@ export function App() {
         const requestMarker = typeof body.requestId === 'string' ? `（请求编号：${body.requestId}）` : '';
         throw new Error(`${body.message ?? '建议请求失败'}${requestMarker}`);
       }
-      if (state.imageId !== body.imageId || state.revision !== body.baseRevision) throw new Error('建议已过期');
+      if (state.imageId !== body.imageId || state.revision !== body.baseRevision || body.workflowId !== payload.workflow.workflowId || workflowSignatureRef.current !== requestSignature) throw new Error('建议已过期');
       const planPayload = body.payload as PlanPayload;
       if (planPayload.status !== 'plan') { setStatus(planPayload.message || '本次没有可应用的建议'); return; }
       setCandidate({ payload: planPayload, planId: body.planId, requestId: body.requestId, baseRevision: body.baseRevision });
@@ -713,10 +799,12 @@ export function App() {
   const applySamCandidate = (item: SamCandidate) => {
     if (!state || candidate || state.regions.length >= 4) { setStatus('局部区域最多四个'); return; }
     if (item.imageId !== state.imageId || item.sourceVersion !== state.sourceVersion) { setStatus('选区已过期，请重新识别'); return; }
+    const regionId = uid();
     commit({ ...state, regions: [...state.regions, {
-      id: uid(), label: item.displayLabel.slice(0, 40), enabled: true, mode: 'inside', shape: 'raster', maskRef: item.maskRef, featherRadius: 0,
+      id: regionId, label: item.displayLabel.slice(0, 40), enabled: true, mode: 'inside', shape: 'raster', maskRef: item.maskRef, featherRadius: 0,
       adjustments: { exposureEV: 0, highlights: 0, saturation: 0 },
     }] });
+    setActiveRegionId(regionId);
     setSamCandidates((items) => items.filter((candidateItem) => candidateItem.candidateId !== item.candidateId));
     setStatus('选区已加入局部调整，可在右侧设置曝光、高光和饱和度');
   };
@@ -833,6 +921,7 @@ export function App() {
               onPointerUp={finishBrushStroke}
               onPointerCancel={finishBrushStroke}
             />
+            {state && activeRegion && <MaskOutline state={state} region={activeRegion} regionIndex={state.regions.findIndex((region) => region.id === activeRegion.id)} rasterBounds={activeRasterBounds} box={canvasBounds} />}
           </div>
           {bottomPanelOpen && <CopilotPanel
             status={status}
@@ -868,6 +957,8 @@ export function App() {
           onAspectLockChange={handleAspectLockChange}
           onAddRegion={handleAddRegion}
           regionCount={state?.regions.length ?? 0}
+          activeRegionId={activeRegionId}
+          onActivateRegion={setActiveRegionId}
           samCandidates={samCandidates}
           onApplySamCandidate={(candidateId) => {
             const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);

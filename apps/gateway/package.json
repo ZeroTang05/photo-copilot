@@ -13,6 +13,7 @@
     "@fastify/cookie": "11.0.2",
     "@gradio/client": "2.7.0",
     "@photo-copilot/ai-contract": "workspace:*",
+    "@photo-copilot/ai-prompts": "workspace:*",
     "@photo-copilot/domain": "workspace:*",
     "fastify": "5.5.0",
     "openai": "5.19.1",
