@@ -55,3 +55,11 @@ Cloudflare 的一键部署会从 `.dev.vars.example` 读取 `AI_API_KEY` 与 `SE
 ## 运行约束
 
 会话与每日额度保存在 Durable Object。Vercel 网关仍使用进程内存。生产环境优先选择 Cloudflare 部署以获得持久化额度控制。
+
+## 查看调色工作流日志
+
+本地 Node 网关会把结构化日志同时写到终端和 `logs/ai-workflow.ndjson`。可用 `AI_WORKFLOW_LOG_FILE` 改变文件位置。Cloudflare 与 Vercel 在各自平台的运行日志中保存同一类记录。
+
+每一步都有醒目的摘要：`[ROUTER 输入]`、`[BRIEF 发送]`、`[PLANNER 输出]`、`[REVIEWER 完成]`、`[CORRECTOR 失败]`。按 `workflowId` 可以找到一次修图的全部阶段；按 `requestId` 可以找到单次模型请求。`workflow.request` 包含完整系统 Prompt、结构化文字输入和输出 Schema；`workflow.output.raw` 保存模型原始文字；`workflow.output.validated` 保存通过校验后的对象；`workflow.error` 保存 Prompt、输入和报错详情。图片仅记录角色、尺寸和 SHA-256 哈希，不记录像素或密钥。
+
+日志会包含用户输入的修图文字和模型输出。排查结束后按项目的数据保留要求处理本地日志文件。

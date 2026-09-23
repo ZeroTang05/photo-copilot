@@ -27,6 +27,7 @@ Photo Copilot 面向摄影爱好者，提供浏览器内的参数式修图。照
 | [SAM 3 接入实施文档](SAM3-INTEGRATION-SPEC.md) | Gradio 接口、像素蒙版、LLM 区域输入与完整开发任务 |
 | [分层调色工作流](AI-COLOR-WORKFLOW-V2.md) | 场景路由、诊断、真实预览检查、调用预算与评测 |
 | [分阶段调色提示词](AI-COLOR-PROMPTS-V2.md) | 各阶段完整模板、场景补充规则与示例设计 |
+| [照片内容及光线模块](AI-COLOR-SCENE-MODULES.md) | 人像、风景等主体与夜景、逆光等光线关注点及组合规则 |
 
 ## 文档权威边界
 

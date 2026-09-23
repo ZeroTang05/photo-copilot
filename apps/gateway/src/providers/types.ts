@@ -13,12 +13,17 @@ export interface ProviderConfig {
 
 export interface ProviderImage {
   base64: string;
+  id?: string;
+  role?: string;
 }
 
 export interface ProviderCallInput {
   instructions: string;
   userText: string;
   images: ProviderImage[];
+  outputSchema?: Record<string, unknown>;
+  toolName?: string;
+  maxOutputTokens?: number;
 }
 
 export interface ProviderUsage {

@@ -2,8 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from '../node_modules/zod/index.js';
 import { Client, handle_file } from '@gradio/client';
 import { PlanPayloadSchema, RENDERER_VERSION, validatePlan } from '../../../packages/domain/src/index';
-import { PlanRequestSchema as SharedPlanRequestSchema, planPayloadJsonSchema } from '../../../packages/ai-contract/src/index';
-import { buildPlannerPrompt, promptVersions } from '../../../packages/ai-prompts/src/index';
+import { BriefRequestSchema, EditBriefSchema, PlanRequestSchema as SharedPlanRequestSchema, planPayloadJsonSchema, ReviewReportSchema, ReviewRequestSchema, RouteDecisionSchema, RouteRequestSchema, validateJpegPreview } from '../../../packages/ai-contract/src/index';
+import { buildPlannerPrompt, buildStagePrompt, CAPABILITY_VERSION, promptVersions, selectSceneModules } from '../../../packages/ai-prompts/src/index';
 
 interface Env {
   AI_SDK?: 'openai' | 'anthropic';
@@ -40,9 +40,10 @@ const response = (body: unknown, status = 200, headers?: HeadersInit) => Respons
 /** Cloudflare 与 Vercel 使用相同字段，便于用 requestId 对照两边的运行时日志。 */
 function writeLog(level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>) {
   const line = JSON.stringify({ timestamp: new Date().toISOString(), service: 'photo-copilot', event, ...fields });
-  if (level === 'error') console.error(line);
-  else if (level === 'warn') console.warn(line);
-  else console.log(line);
+  const prefix = typeof fields.summary === 'string' ? `[${fields.summary}] ` : '';
+  if (level === 'error') console.error(`${prefix}${line}`);
+  else if (level === 'warn') console.warn(`${prefix}${line}`);
+  else console.log(`${prefix}${line}`);
 }
 
 /** 仅提取可诊断字段，避免把密钥、Cookie、请求图片或完整请求头写入日志。 */
@@ -84,12 +85,9 @@ function allowed(request: Request, env: Env) {
   return Boolean(origin && (origins.length ? origins.includes(origin) : origin === new URL(request.url).origin));
 }
 
-function jpegBytes(base64: string, preview: z.infer<typeof PreviewSchema>) {
-  const binary = atob(base64);
-  if (binary.length > 512 * 1024) throw new Error('分析图片超过大小限制');
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('分析图片必须是 JPEG');
-  return new Blob([bytes], { type: preview.mime });
+function jpegBytes(base64: string, preview: z.infer<typeof PreviewSchema>, maxBytes = 512 * 1024) {
+  const bytes = validateJpegPreview({ base64, width: preview.width, height: preview.height }, maxBytes);
+  return new Blob([new Uint8Array(bytes)], { type: preview.mime });
 }
 
 /**
@@ -230,15 +228,6 @@ async function quota(env: Env, input: object) {
   return env.AI_QUOTA.get(env.AI_QUOTA.idFromName('global')).fetch('https://quota.internal', { method: 'POST', body: JSON.stringify(input) });
 }
 
-function removeUnauthorizedComposition(payload: z.infer<typeof PlanPayloadSchema>, allowComposition: boolean) {
-  if (allowComposition || payload.status !== 'plan' || !payload.changes?.transform) return payload;
-  const changes = { ...payload.changes, transform: null };
-  const reasons = payload.reasons.filter((reason) => reason.target !== 'transform');
-  const hasEditableChange = changes.globalAssignments.length > 0 || changes.regionUpserts.length > 0 || changes.regionDeletes.length > 0;
-  if (hasEditableChange) return { ...payload, changes, reasons };
-  return { ...payload, status: 'clarify' as const, message: '当前没有授权 AI 调整构图，因此未生成可应用的调色修改。', changes: null, reasons: [], limitations: [...payload.limitations, '构图调整已忽略。'].slice(0, 3) };
-}
-
 /** Worker 与本地网关使用同样的范围规则，局部请求无法被模型扩展成整图修改。 */
 function validateWorkflowScope(request: ReturnType<typeof SharedPlanRequestSchema.parse>, payload: z.infer<typeof PlanPayloadSchema>) {
   if (payload.status !== 'plan' || !payload.changes) return;
@@ -247,6 +236,15 @@ function validateWorkflowScope(request: ReturnType<typeof SharedPlanRequestSchem
   if (changes.globalAssignments.some((assignment) => locks.globalParameters.includes(assignment.parameter))) throw new Error('计划修改了已锁定的全局参数');
   if (changes.transform && locks.composition) throw new Error('计划修改了已锁定的构图');
   if (changes.regionUpserts.some((region) => locks.regionIds.includes(region.id)) || changes.regionDeletes.some((id) => locks.regionIds.includes(id))) throw new Error('计划修改了已锁定的局部区域');
+  const existingIds = new Set(request.state.regions.map((region) => region.id));
+  if (changes.regionUpserts.some((region) => !existingIds.has(region.id))) throw new Error('模型不能创建新的区域 ID；请先完成选区准备');
+  if (request.stage === 'corrector' && request.review?.verdict === 'revise' && request.candidate?.changes) {
+    const allowed = new Set(request.review.issues.flatMap((issue) => issue.allowedParameterNames));
+    const previous = new Map(request.candidate.changes.globalAssignments.map((item) => [item.parameter, item.value]));
+    const next = new Map(changes.globalAssignments.map((item) => [item.parameter, item.value]));
+    for (const parameter of new Set([...previous.keys(), ...next.keys()])) if (previous.get(parameter) !== next.get(parameter) && !allowed.has(parameter)) throw new Error(`修正修改了未授权参数：${parameter}`);
+    if (JSON.stringify(changes.regionUpserts) !== JSON.stringify(request.candidate.changes.regionUpserts) || JSON.stringify(changes.regionDeletes) !== JSON.stringify(request.candidate.changes.regionDeletes) || JSON.stringify(changes.transform) !== JSON.stringify(request.candidate.changes.transform)) throw new Error('定向修正改变了未授权的区域或构图');
+  }
   if (request.route !== 'local') return;
   if (!selectedTargetId) throw new Error('局部路线缺少选中区域');
   if (changes.globalAssignments.length || changes.transform || changes.regionDeletes.length || changes.regionUpserts.some((region) => region.id !== selectedTargetId)) throw new Error('局部路线超出了选中区域的作用范围');
@@ -296,18 +294,19 @@ const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message 
 
 async function requestPlanFromProvider(
   env: Env,
-  request: ReturnType<typeof SharedPlanRequestSchema.parse>,
+  images: string[],
   requestId: string,
   instructions: string,
   userText: string,
   attempt: number,
+  maxOutputTokens = 6000,
 ) {
   const anthropic = env.AI_SDK === 'anthropic';
   const base = (env.AI_BASE_URL || (anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com/v1')).replace(/\/$/, '');
   const startedAt = Date.now();
   const provider = anthropic
-    ? await fetch(`${base.endsWith('/v1') ? base : `${base}/v1`}/messages`, { method: 'POST', headers: { 'x-api-key': env.AI_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'claude-3-5-sonnet-latest', max_tokens: 6000, system: `${instructions} 只输出 JSON，不要使用 Markdown。`, messages: [{ role: 'user', content: [{ type: 'text', text: userText }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.originalPreview.base64 } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: request.currentPreview.base64 } }, ...(request.referencePreview ? [{ type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: request.referencePreview.base64 } }] : [])] }] }) })
-    : await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.AI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: 6000, instructions, input: [{ role: 'user', content: [{ type: 'input_text', text: userText }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.originalPreview.base64}`, detail: 'high' }, { type: 'input_image', image_url: `data:image/jpeg;base64,${request.currentPreview.base64}`, detail: 'high' }, ...(request.referencePreview ? [{ type: 'input_image', image_url: `data:image/jpeg;base64,${request.referencePreview.base64}`, detail: 'high' }] : [])] }], text: { format: { type: 'json_object' } } }) });
+    ? await fetch(`${base.endsWith('/v1') ? base : `${base}/v1`}/messages`, { method: 'POST', headers: { 'x-api-key': env.AI_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'claude-3-5-sonnet-latest', max_tokens: maxOutputTokens, system: `${instructions} 只输出 JSON，不要使用 Markdown。`, messages: [{ role: 'user', content: [{ type: 'text', text: userText }, ...images.map((data) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data } }))] }] }) })
+    : await fetch(`${base}/responses`, { method: 'POST', headers: { authorization: `Bearer ${env.AI_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: env.AI_MODEL || 'gpt-4o-mini', store: false, max_output_tokens: maxOutputTokens, instructions, input: [{ role: 'user', content: [{ type: 'input_text', text: userText }, ...images.map((data) => ({ type: 'input_image' as const, image_url: `data:image/jpeg;base64,${data}`, detail: 'high' as const }))] }], text: { format: { type: 'json_object' } } }) });
   const providerResponse = await provider.text();
   let body: Record<string, any>;
   try {
@@ -351,6 +350,51 @@ async function requestPlanFromProvider(
   return { raw, model: String(body.model), usage: body.usage ?? {}, durationMs: Date.now() - startedAt };
 }
 
+/** 记录图片身份而不在日志中写入像素。 */
+async function loggedImages(images: Array<{ id: string; role: string; preview: { base64: string; width: number; height: number } }>) {
+  return Promise.all(images.map(async (image) => {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(image.preview.base64)));
+    return { id: image.id, role: image.role, width: image.preview.width, height: image.preview.height, sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('') };
+  }));
+}
+
+/** R、D、V 共享阶段调用与完整输入输出日志。 */
+async function runStage(env: Env, stage: 'route' | 'brief' | 'review', request: ReturnType<typeof RouteRequestSchema.parse> | ReturnType<typeof BriefRequestSchema.parse> | ReturnType<typeof ReviewRequestSchema.parse>) {
+  const promptStage = stage === 'route' ? 'router' : stage === 'brief' ? 'brief' : 'reviewer';
+  const schema = stage === 'route' ? RouteDecisionSchema : stage === 'brief' ? EditBriefSchema : ReviewReportSchema;
+  const stageInput = {
+    workflow: request.workflow, route: request.route, attempt: request.attempt,
+    imageManifest: request.images.map(({ id, role, preview }) => ({ id, role, width: preview.width, height: preview.height })),
+    ...(stage === 'route' ? { uiMode: (request as ReturnType<typeof RouteRequestSchema.parse>).uiMode, selectedTargetId: request.workflow.selectedTargetId, availableTargetIds: request.state.regions.map((region) => region.id) } : {}),
+    ...(stage === 'brief' ? { selection: (request as ReturnType<typeof BriefRequestSchema.parse>).selection, currentState: request.state } : {}),
+    ...(stage === 'review' ? { brief: (request as ReturnType<typeof ReviewRequestSchema.parse>).brief, candidateChanges: (request as ReturnType<typeof ReviewRequestSchema.parse>).candidate.changes, reviewAttempt: (request as ReturnType<typeof ReviewRequestSchema.parse>).reviewAttempt } : {}),
+  };
+  const input = JSON.stringify(stageInput);
+  const schemaJson = z.toJSONSchema(schema, { target: 'draft-2020-12' });
+  const sceneProfile = stage === 'review' ? (request as ReturnType<typeof ReviewRequestSchema.parse>).brief.sceneProfile : undefined;
+  const prompt = buildStagePrompt({ stage: promptStage, route: request.route, stageInput: input, outputSchema: JSON.stringify(schemaJson), sceneProfile });
+  const images = await loggedImages(request.images);
+  const fields = { requestId: request.requestId, workflowId: request.workflow.workflowId, stage: promptStage, route: request.route, promptVersion: promptVersions[promptStage], capabilityVersion: request.workflow.capabilityVersion, attempt: request.attempt, images, modules: sceneProfile ? selectSceneModules(sceneProfile).map((item) => item.id) : [] };
+  writeLog('info', 'workflow.input', { summary: `${promptStage.toUpperCase()} 输入`, ...fields, input: stageInput });
+  writeLog('info', 'workflow.request', { summary: `${promptStage.toUpperCase()} 发送`, ...fields, prompt, input: stageInput, outputSchema: schemaJson });
+  try {
+    const maxOutputTokens = stage === 'route' ? 600 : stage === 'brief' ? 1600 : 1400;
+    const output = await requestPlanFromProvider(env, request.images.map((image) => image.preview.base64), request.requestId, prompt, input, request.attempt, maxOutputTokens);
+    writeLog('info', 'workflow.output.raw', { summary: `${promptStage.toUpperCase()} 输出`, ...fields, model: output.model, rawOutput: output.raw, usage: output.usage, durationMs: output.durationMs });
+    const payload = schema.parse(JSON.parse(stripMarkdownFences(output.raw)));
+    if (stage === 'brief') {
+      const ids = new Set(request.state.regions.map((region) => region.id));
+      const brief = payload as ReturnType<typeof EditBriefSchema.parse>;
+      for (const id of [...brief.sceneProfile.targetIds, ...brief.priorities.map((item) => item.targetId).filter((id): id is string => id !== null)]) if (!ids.has(id)) throw new Error(`诊断引用了不存在的区域：${id}`);
+    }
+    writeLog('info', 'workflow.output.validated', { summary: `${promptStage.toUpperCase()} 完成`, ...fields, normalizedOutput: payload, durationMs: output.durationMs });
+    return { requestId: request.requestId, workflowId: request.workflow.workflowId, model: output.model, promptVersion: promptVersions[promptStage], payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, durationMs: output.durationMs } };
+  } catch (cause) {
+    writeLog('error', 'workflow.error', { summary: `${promptStage.toUpperCase()} 失败`, ...fields, prompt, input: stageInput, error: errorLogDetails(cause) });
+    throw cause;
+  }
+}
+
 /** 图片位置由清单定义，避免不同模型把“第几张图”误当成固定角色。 */
 function planStageInput(request: ReturnType<typeof SharedPlanRequestSchema.parse>) {
   const target = request.workflow.selectedTargetId ? request.state.regions.find((region) => region.id === request.workflow.selectedTargetId) : undefined;
@@ -362,8 +406,12 @@ function planStageInput(request: ReturnType<typeof SharedPlanRequestSchema.parse
       { id: 'original', role: 'before', width: request.originalPreview.width, height: request.originalPreview.height },
       { id: 'current', role: 'current', width: request.currentPreview.width, height: request.currentPreview.height },
       ...(request.referencePreview ? [{ id: 'reference', role: 'reference', width: request.referencePreview.width, height: request.referencePreview.height }] : []),
+      ...(request.candidatePreview ? [{ id: 'candidate', role: 'candidate', width: request.candidatePreview.width, height: request.candidatePreview.height }] : []),
     ],
     currentState: request.state,
+    brief: request.brief ?? null,
+    review: request.review ?? null,
+    candidate: request.candidate?.changes ?? null,
     allowedTargetIds: request.route === 'local' && target ? [target.id] : request.state.regions.map((region) => region.id),
     selectedTarget: target ?? null,
     allowComposition: request.allowComposition,
@@ -373,18 +421,30 @@ function planStageInput(request: ReturnType<typeof SharedPlanRequestSchema.parse
 
 async function plan(env: Env, request: ReturnType<typeof SharedPlanRequestSchema.parse>, requestId: string) {
   const initial = planStageInput(request);
-  let instructions = buildPlannerPrompt({ route: request.route, outputSchema: JSON.stringify(planPayloadJsonSchema), stageInput: initial });
+  let instructions = buildPlannerPrompt({ stage: request.stage, route: request.route, outputSchema: JSON.stringify(planPayloadJsonSchema), stageInput: initial, sceneProfile: request.brief?.sceneProfile });
   let userText = initial;
   let totalUsage: Record<string, unknown> = {};
   let lastError: unknown;
+  const imageInputs = [
+    { id: 'original', role: 'original', preview: request.originalPreview },
+    { id: 'current', role: 'current', preview: request.currentPreview },
+    ...(request.referencePreview ? [{ id: 'reference', role: 'reference', preview: request.referencePreview }] : []),
+    ...(request.candidatePreview ? [{ id: 'candidate', role: 'candidate', preview: request.candidatePreview }] : []),
+  ];
+  const images = await loggedImages(imageInputs);
+  const logBase = { requestId, workflowId: request.workflow.workflowId, stage: request.stage, route: request.route, capabilityVersion: request.workflow.capabilityVersion, promptVersion: promptVersions[request.stage], images, modules: request.brief ? selectSceneModules(request.brief.sceneProfile).map((item) => item.id) : [] };
 
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const output = await requestPlanFromProvider(env, request, requestId, instructions, userText, attempt);
+    writeLog('info', 'workflow.input', { summary: `${request.stage.toUpperCase()} 输入`, ...logBase, attempt, input: userText });
+    writeLog('info', 'workflow.request', { summary: `${request.stage.toUpperCase()} 发送`, ...logBase, attempt, prompt: instructions, input: userText, outputSchema: planPayloadJsonSchema });
+    const output = await requestPlanFromProvider(env, imageInputs.map((image) => image.preview.base64), requestId, instructions, userText, attempt, request.stage === 'planner' ? 3000 : 3000);
+    writeLog('info', 'workflow.output.raw', { summary: `${request.stage.toUpperCase()} 输出`, ...logBase, attempt, model: output.model, rawOutput: output.raw, usage: output.usage, durationMs: output.durationMs });
     totalUsage = { ...totalUsage, ...output.usage };
     try {
-      const payload = removeUnauthorizedComposition(PlanPayloadSchema.parse(normalizeModelPayload(JSON.parse(stripMarkdownFences(output.raw)))), request.allowComposition);
+      const payload = PlanPayloadSchema.parse(normalizeModelPayload(JSON.parse(stripMarkdownFences(output.raw))));
       validatePlan(request.state, payload, request.allowComposition);
       validateWorkflowScope(request, payload);
+      writeLog('info', 'workflow.output.validated', { summary: `${request.stage.toUpperCase()} 完成`, ...logBase, attempt, normalizedOutput: payload, durationMs: output.durationMs });
       return { payload, model: output.model, usage: totalUsage, attempts: attempt };
     } catch (cause) {
       lastError = cause;
@@ -400,9 +460,11 @@ async function plan(env: Env, request: ReturnType<typeof SharedPlanRequestSchema
       if (attempt === 2) break;
       userText = `${initial}\n\n[上次对象]\n${output.raw}\n[校验错误]\n${errorMessage(cause)}`;
       instructions = buildPlannerPrompt({
+        stage: request.stage,
         route: request.route,
         outputSchema: JSON.stringify(planPayloadJsonSchema),
         stageInput: initial,
+        sceneProfile: request.brief?.sceneProfile,
         invalidOutput: output.raw,
         errorList: errorMessage(cause),
       });
@@ -422,6 +484,32 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
     return response({ authenticated: true, ...await stored.json() }, 200, session.cookie ? { 'set-cookie': session.cookie } : undefined);
   }
   if (request.method === 'GET' && url.pathname === '/api/segment-capabilities') return response({ pointSegmentation: env.SAM_POINT_SEGMENTATION === 'true' }, 200, { 'cache-control': 'no-store' });
+  if (request.method === 'POST' && /^\/api\/color-workflow\/(route|brief|review)$/.test(url.pathname)) {
+    if (!allowed(request, env)) return response(error('ORIGIN_DENIED', '当前来源无法使用服务'), 403);
+    if (!env.AI_API_KEY) return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用'), 503);
+    const stage = url.pathname.split('/').at(-1) as 'route' | 'brief' | 'review';
+    let parsed: ReturnType<typeof RouteRequestSchema.parse> | ReturnType<typeof BriefRequestSchema.parse> | ReturnType<typeof ReviewRequestSchema.parse>;
+    try {
+      parsed = (stage === 'route' ? RouteRequestSchema : stage === 'brief' ? BriefRequestSchema : ReviewRequestSchema).parse(await request.json());
+      if (parsed.workflow.capabilityVersion !== CAPABILITY_VERSION || parsed.workflow.imageId !== parsed.state.imageId || parsed.workflow.sourceVersion !== parsed.state.sourceVersion || parsed.workflow.baseRevision !== parsed.state.revision) throw new Error('工作流快照与编辑状态不一致');
+      const roles = new Set<string>();
+      for (const image of parsed.images) { jpegBytes(image.preview.base64, image.preview, 1024 * 1024); if (roles.has(image.role)) throw new Error(`图片角色重复：${image.role}`); roles.add(image.role); }
+      if (stage === 'brief' && (!roles.has('original') || !roles.has('current'))) throw new Error('诊断需要原图和当前效果图');
+      if (stage === 'review' && (!roles.has('current') || !roles.has('candidate'))) throw new Error('检查需要当前效果图和候选图');
+    } catch (cause) {
+      writeLog('warn', 'workflow.request.invalid', { summary: `${stage.toUpperCase()} 输入错误`, stage, error: errorLogDetails(cause) });
+      return response(error('WORKFLOW_REQUEST_INVALID', '工作流输入不符合要求'), 400);
+    }
+    const reserved = await quota(env, { action: 'reserve', sessionId: session.id, requestId: parsed.requestId, ...limits });
+    if (!reserved.ok) return response({ ...await reserved.json() as object, requestId: parsed.requestId }, reserved.status, session.cookie ? { 'set-cookie': session.cookie } : undefined);
+    try {
+      const output = await runStage(env, stage, parsed);
+      return response(output, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+    } catch (cause) {
+      writeLog('error', 'workflow.stage.failed', { summary: `${stage.toUpperCase()} 失败`, stage, requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, error: errorLogDetails(cause) });
+      return response({ ...error('WORKFLOW_STAGE_FAILED', `${stage} 阶段失败，请查看服务端日志`), requestId: parsed.requestId }, 502);
+    }
+  }
   if (request.method === 'POST' && url.pathname === '/api/segment') {
     if (!allowed(request, env)) return response(error('ORIGIN_DENIED', '当前来源无法使用服务'), 403);
     let parsed; let jpeg: Blob;
@@ -477,7 +565,7 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
       writeLog('error', 'ai.plan.configuration_missing', { missing: 'AI_API_KEY' });
       return response(error('AI_UNAVAILABLE', 'AI 服务暂不可用，本地编辑仍可继续'), 503);
     }
-    let parsed; try { parsed = SharedPlanRequestSchema.parse(await request.json()); } catch (cause) {
+    let parsed; try { parsed = SharedPlanRequestSchema.parse(await request.json()); if (parsed.workflow.capabilityVersion !== CAPABILITY_VERSION) throw new Error('能力版本不匹配'); } catch (cause) {
       writeLog('error', 'ai.plan.request_invalid', { error: errorLogDetails(cause) });
       return response(error('REQUEST_INVALID', '请求内容不符合编辑协议'), 400);
     }
@@ -500,7 +588,7 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
       workflowId: parsed.workflow.workflowId,
       workflowStage: parsed.stage,
       route: parsed.route,
-      promptVersion: promptVersions.planner,
+      promptVersion: promptVersions[parsed.stage],
       capabilityVersion: parsed.workflow.capabilityVersion,
       provider: env.AI_SDK === 'anthropic' ? 'anthropic' : 'openai',
       model: env.AI_MODEL,
@@ -522,14 +610,14 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
         workflowId: parsed.workflow.workflowId,
         workflowStage: parsed.stage,
         route: parsed.route,
-        promptVersion: promptVersions.planner,
+        promptVersion: promptVersions[parsed.stage],
         capabilityVersion: parsed.workflow.capabilityVersion,
         durationMs: Date.now() - started,
         attempts: output.attempts,
         usage: output.usage,
         planOutput: output.payload,
       });
-      return response({ requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: promptVersions.planner, rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
+      return response({ requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, imageId: parsed.imageId, baseRevision: parsed.baseRevision, planId: crypto.randomUUID(), model: output.model, promptVersion: promptVersions[parsed.stage], rendererVersion: RENDERER_VERSION, payload: output.payload, usage: { inputTokens: output.usage.input_tokens ?? null, outputTokens: output.usage.output_tokens ?? null, cachedInputTokens: output.usage.input_tokens_details?.cached_tokens ?? null, attempts: output.attempts, durationMs: Date.now() - started } }, 200, { 'cache-control': 'no-store', ...(session.cookie ? { 'set-cookie': session.cookie } : {}) });
     } catch (cause) {
       writeLog('error', 'ai.plan.failed', {
         requestId: parsed.requestId,

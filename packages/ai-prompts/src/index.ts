@@ -1,4 +1,7 @@
 import { RENDERER_VERSION } from '@photo-copilot/domain';
+import type { SceneProfile } from '@photo-copilot/ai-contract';
+import { selectSceneModules } from './scene-modules.js';
+export { selectSceneModules } from './scene-modules.js';
 
 /** 工作流与能力表独立版本，日志可据此还原模型看到的真实工具边界。 */
 export const WORKFLOW_VERSION = 'pc-color-workflow-2' as const;
@@ -69,6 +72,9 @@ ready 时 question=null；clarify/unsupported 时不产生编辑动作。
 {{stage_input}}`;
 
 const brief = `任务：形成一份简短、可执行的编辑目标说明。本阶段不输出滑杆数值。
+
+同时输出 sceneProfile：依据待编辑照片和本次任务选择 1–2 个主体标签 person、landscape、architecture、food_product、animal、other，以及 0–2 个光线标签 night、backlit、mixed_light、flat_hazy。
+primarySubject 必须等于 subjects 第一项。subjectEvidence 写可见依据；没有清楚光线依据时 lighting=[]、lightingEvidence=null。标签只帮助选择观察重点，不授予编辑权限。
 
 先以用户目标判断哪些画面特征需要保留，再识别妨碍目标的问题。
 当前效果用于判断下一步变化；原图用于理解照片基础和已有编辑。
@@ -169,6 +175,7 @@ export function buildStagePrompt(input: {
   outputSchema: string;
   stageInput: string;
   route?: WorkflowRoute;
+  sceneProfile?: SceneProfile;
   invalidOutput?: string;
   errorList?: string;
 }) {
@@ -181,20 +188,25 @@ export function buildStagePrompt(input: {
   };
   const stagePrompt = render(templates[input.stage], values);
   const fragment = input.route ? `\n\n场景规则：\n${routeFragments[input.route]}` : '';
-  return `${render(common, values)}\n\n${stagePrompt}${fragment}`;
+  const sceneModules = input.sceneProfile ? selectSceneModules(input.sceneProfile) : [];
+  const sceneText = sceneModules.length ? `\n\n照片模块（仅作观察提示）：\n${sceneModules.map((item) => `[${item.id}] ${item.text}`).join('\n')}` : '';
+  return `${render(common, values)}\n\n${stagePrompt}${fragment}${sceneText}`;
 }
 
 /** 规划阶段与格式修复使用同一份原始能力边界，修复不会趁机改动审美方向。 */
 export function buildPlannerPrompt(input: {
+  stage?: 'planner' | 'corrector';
   route: WorkflowRoute;
   outputSchema: string;
   stageInput: string;
+  sceneProfile?: SceneProfile;
   invalidOutput?: string;
   errorList?: string;
 }) {
   return buildStagePrompt({
-    stage: input.invalidOutput === undefined ? 'planner' : 'schemaRepair',
+    stage: input.invalidOutput === undefined ? input.stage ?? 'planner' : 'schemaRepair',
     route: input.route,
+    sceneProfile: input.sceneProfile,
     outputSchema: input.outputSchema,
     stageInput: input.stageInput,
     invalidOutput: input.invalidOutput,

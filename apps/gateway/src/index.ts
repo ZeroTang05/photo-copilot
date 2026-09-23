@@ -1,13 +1,19 @@
 import cookie from '@fastify/cookie';
 import Fastify from 'fastify';
+import { createWriteStream, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+import pino from 'pino';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { PlanRequestSchema, PlanResponseSchema, planPayloadJsonSchema, SegmentIntentRequestSchema, SegmentIntentResponseSchema, SegmentIntentSchema, SegmentRequestSchema, SegmentResponseSchema } from '@photo-copilot/ai-contract';
-import { buildPlannerPrompt, promptVersions } from '@photo-copilot/ai-prompts';
+import { BriefRequestSchema, EditBriefSchema, PlanRequestSchema, PlanResponseSchema, planPayloadJsonSchema, ReviewReportSchema, ReviewRequestSchema, RouteDecisionSchema, RouteRequestSchema, SegmentIntentRequestSchema, SegmentIntentResponseSchema, SegmentIntentSchema, SegmentRequestSchema, SegmentResponseSchema, WorkflowStageResponseSchema, validateJpegPreview } from '@photo-copilot/ai-contract';
+import { buildPlannerPrompt, CAPABILITY_VERSION, promptVersions } from '@photo-copilot/ai-prompts';
 import { RENDERER_VERSION, validatePlan, type PlanPayload } from '@photo-copilot/domain';
 import { createProvider, errorLogDetails, resolveProviderKind } from './providers/index.js';
 import { planWithRepair } from './planner.js';
+import { imageManifest, runWorkflowStage } from './workflow-stage.js';
 import { SamProviderError, SamTokenPool, inlineFallbackMasks, runWithSamTokens, segmentPointsWithSam3, segmentWithSam3 } from './providers/sam3.js';
 
 const config = {
@@ -42,7 +48,25 @@ const samModelscope = samModelscopeUrl && samModelscopeToken ? { url: samModelsc
 
 const provider = createProvider(config.provider, { apiKey: config.apiKey, baseURL: config.baseURL, model: config.model });
 
-export const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.body'] }, bodyLimit: 8 * 1024 * 1024 });
+/** 本地写入 NDJSON 日志文件；部署平台继续从标准输出保存同一批结构化记录。 */
+const workflowLogFile = process.env.AI_WORKFLOW_LOG_FILE?.trim() || (process.env.NODE_ENV === 'production' ? undefined : 'logs/ai-workflow.ndjson');
+const projectRoot = fileURLToPath(new URL('../../../', import.meta.url));
+const consoleLog = new Writable({
+  write(chunk, _encoding, done) {
+    const line = String(chunk);
+    const record = JSON.parse(line) as { msg?: string };
+    const summary = record.msg?.match(/^\[[^\]]+\]/)?.[0];
+    process.stdout.write(summary ? `${summary} ${line}` : line);
+    done();
+  },
+});
+const logStreams: Array<{ stream: NodeJS.WritableStream }> = [{ stream: consoleLog }];
+if (workflowLogFile) {
+  const absolute = resolve(projectRoot, workflowLogFile);
+  mkdirSync(dirname(absolute), { recursive: true });
+  logStreams.push({ stream: createWriteStream(absolute, { flags: 'a' }) });
+}
+export const app = Fastify({ loggerInstance: pino({ redact: ['req.headers.cookie', 'req.body'] }, pino.multistream(logStreams)), bodyLimit: 8 * 1024 * 1024 });
 await app.register(cookie);
 const utcDay = () => new Date().toISOString().slice(0, 10);
 const sessions = new Map<string, { id: string; expiresAt: number; attempts: number; samAttempts: number; day: string; requestIds: Map<string, number> }>();
@@ -85,13 +109,8 @@ function getOrCreateSession(rawCookie: string | undefined, reply: { setCookie: (
   });
   return { id, session };
 }
-function jpegSize(base64: string) { const bytes=Buffer.from(base64,'base64'); if(bytes.length<4 || bytes[0]!==0xff || bytes[1]!==0xd8) throw new Error('分析图片必须是 JPEG'); let i=2; while(i<bytes.length){ if(bytes[i]!==0xff){i++;continue;} const marker=bytes[i+1]; const len=bytes.readUInt16BE(i+2); if(marker !== undefined && marker>=0xc0 && marker<=0xc3) return {width:bytes.readUInt16BE(i+5),height:bytes.readUInt16BE(i+7)}; i+=2+len; } throw new Error('JPEG 尺寸读取失败'); }
 function checkedJpeg(base64: string, expected: { width: number; height: number }, maxBytes: number) {
-  const bytes = Buffer.from(base64, 'base64');
-  if (bytes.length > maxBytes) throw new Error('分析图片超过大小限制');
-  const actual = jpegSize(base64);
-  if (actual.width !== expected.width || actual.height !== expected.height) throw new Error('JPEG 实际尺寸与声明不一致');
-  return bytes;
+  return Buffer.from(validateJpegPreview({ base64, ...expected }, maxBytes));
 }
 
 const segmentIntentInstructions = `你是 Photo Copilot 的局部选区规划器。阅读用户指令、原图和已有区域，只输出 JSON。
@@ -133,8 +152,12 @@ function planStageInput(request: ReturnType<typeof PlanRequestSchema.parse>) {
       { id: 'original', role: 'before', width: request.originalPreview.width, height: request.originalPreview.height },
       { id: 'current', role: 'current', width: request.currentPreview.width, height: request.currentPreview.height },
       ...(request.referencePreview ? [{ id: 'reference', role: 'reference', width: request.referencePreview.width, height: request.referencePreview.height }] : []),
+      ...(request.candidatePreview ? [{ id: 'candidate', role: 'candidate', width: request.candidatePreview.width, height: request.candidatePreview.height }] : []),
     ],
     currentState: request.state,
+    brief: request.brief ?? null,
+    review: request.review ?? null,
+    candidate: request.candidate?.changes ?? null,
     allowedTargetIds: request.route === 'local' && target ? [target.id] : request.state.regions.map((region) => region.id),
     selectedTarget: target ?? null,
     allowComposition: request.allowComposition,
@@ -153,6 +176,15 @@ function validateWorkflowPlan(request: ReturnType<typeof PlanRequestSchema.parse
   if (changes.transform && locks.composition) throw new Error('计划修改了已锁定的构图');
   if (changes.regionUpserts.some((region) => locks.regionIds.includes(region.id)) || changes.regionDeletes.some((id) => locks.regionIds.includes(id))) {
     throw new Error('计划修改了已锁定的局部区域');
+  }
+  const existingIds = new Set(request.state.regions.map((region) => region.id));
+  if (changes.regionUpserts.some((region) => !existingIds.has(region.id))) throw new Error('模型不能创建新的区域 ID；请先完成选区准备');
+  if (request.stage === 'corrector' && request.review?.verdict === 'revise' && request.candidate?.changes) {
+    const allowed = new Set(request.review.issues.flatMap((issue) => issue.allowedParameterNames));
+    const previous = new Map(request.candidate.changes.globalAssignments.map((item) => [item.parameter, item.value]));
+    const next = new Map(changes.globalAssignments.map((item) => [item.parameter, item.value]));
+    for (const parameter of new Set([...previous.keys(), ...next.keys()])) if (previous.get(parameter) !== next.get(parameter) && !allowed.has(parameter)) throw new Error(`修正修改了未授权参数：${parameter}`);
+    if (JSON.stringify(changes.regionUpserts) !== JSON.stringify(request.candidate.changes.regionUpserts) || JSON.stringify(changes.regionDeletes) !== JSON.stringify(request.candidate.changes.regionDeletes) || JSON.stringify(changes.transform) !== JSON.stringify(request.candidate.changes.transform)) throw new Error('定向修正改变了未授权的区域或构图');
   }
   if (request.route !== 'local') return;
   if (!selectedTargetId) throw new Error('局部路线缺少选中区域');
@@ -180,6 +212,59 @@ app.delete('/api/session', async (request, reply) => {
   return reply.code(204).send();
 });
 app.get('/api/segment-capabilities', async (_request, reply) => reply.header('cache-control', 'no-store').send({ pointSegmentation: config.pointSegmentation }));
+/** R、D、V 各自是一轮独立模型请求；图片身份和阶段输出均在网关校验。 */
+app.post<{ Params: { stage: string } }>('/api/color-workflow/:stage', async (request, reply) => {
+  if (!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED', '当前来源无法使用服务'));
+  if (!config.apiKey) return reply.code(503).send(apiError('AI_UNAVAILABLE', 'AI 服务暂不可用'));
+  const stage = request.params.stage;
+  if (stage !== 'route' && stage !== 'brief' && stage !== 'review') return reply.code(404).send(apiError('NOT_FOUND', '工作流阶段不存在'));
+  const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
+  let parsed: ReturnType<typeof RouteRequestSchema.parse> | ReturnType<typeof BriefRequestSchema.parse> | ReturnType<typeof ReviewRequestSchema.parse>;
+  try {
+    parsed = (stage === 'route' ? RouteRequestSchema : stage === 'brief' ? BriefRequestSchema : ReviewRequestSchema).parse(request.body);
+    if (parsed.workflow.capabilityVersion !== CAPABILITY_VERSION || parsed.workflow.imageId !== parsed.state.imageId || parsed.workflow.sourceVersion !== parsed.state.sourceVersion || parsed.workflow.baseRevision !== parsed.state.revision) throw new Error('工作流快照与当前编辑状态不一致');
+    const roles = new Set<string>();
+    for (const image of parsed.images) {
+      checkedJpeg(image.preview.base64, image.preview, 1024 * 1024);
+      if (roles.has(image.role)) throw new Error(`图片角色重复：${image.role}`);
+      roles.add(image.role);
+    }
+    if (stage === 'brief' && (!roles.has('original') || !roles.has('current'))) throw new Error('诊断需要原图和当前效果图');
+    if (stage === 'review' && (!roles.has('current') || !roles.has('candidate'))) throw new Error('检查需要当前效果图和候选图');
+  } catch (error) {
+    request.log.warn({ event: 'workflow.request.invalid', summary: '输入错误', stage, error: errorLogDetails(error) }, `[${stage.toUpperCase()} 输入] 请求未通过校验`);
+    return reply.code(400).send(apiError('WORKFLOW_REQUEST_INVALID', '工作流输入不符合要求'));
+  }
+  const { session } = active;
+  if (session.day !== utcDay()) { session.day = utcDay(); session.attempts = 0; }
+  resetCounters();
+  if (session.requestIds.has(parsed.requestId)) return reply.code(409).send(apiError('REQUEST_DUPLICATE', '工作流阶段已提交'));
+  if (session.attempts >= config.perSessionLimit || globalAttempts >= config.limit) return reply.code(429).send(apiError('QUOTA_EXHAUSTED', '今日 AI 额度已用完'));
+  session.requestIds.set(parsed.requestId, Date.now()); session.attempts++; globalAttempts++;
+  const stageInput = {
+    workflow: parsed.workflow,
+    route: parsed.route,
+    attempt: parsed.attempt,
+    imageManifest: parsed.images.map(({ id, role, preview }) => ({ id, role, width: preview.width, height: preview.height })),
+    ...(stage === 'route' ? { uiMode: (parsed as ReturnType<typeof RouteRequestSchema.parse>).uiMode, selectedTargetId: parsed.workflow.selectedTargetId, availableTargetIds: parsed.state.regions.map((region) => region.id) } : {}),
+    ...(stage === 'brief' ? { selection: (parsed as ReturnType<typeof BriefRequestSchema.parse>).selection, currentState: parsed.state } : {}),
+    ...(stage === 'review' ? { brief: (parsed as ReturnType<typeof ReviewRequestSchema.parse>).brief, candidateChanges: (parsed as ReturnType<typeof ReviewRequestSchema.parse>).candidate.changes, reviewAttempt: (parsed as ReturnType<typeof ReviewRequestSchema.parse>).reviewAttempt } : {}),
+  };
+  try {
+    const schema = stage === 'route' ? RouteDecisionSchema : stage === 'brief' ? EditBriefSchema : ReviewReportSchema;
+    const output = await runWorkflowStage({ provider, log: request.log, requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, capabilityVersion: parsed.workflow.capabilityVersion, stage: stage === 'route' ? 'router' : stage === 'brief' ? 'brief' : 'reviewer', route: parsed.route, attempt: parsed.attempt, schema, stageInput, images: parsed.images, sceneProfile: stage === 'review' ? (parsed as ReturnType<typeof ReviewRequestSchema.parse>).brief.sceneProfile : undefined, deadlineAt: Date.now() + PLAN_DEADLINE_MS });
+    if (stage === 'brief') {
+      const brief = output.payload as ReturnType<typeof EditBriefSchema.parse>;
+      const ids = new Set(parsed.state.regions.map((region) => region.id));
+      for (const id of [...brief.sceneProfile.targetIds, ...brief.priorities.map((item) => item.targetId).filter((id): id is string => id !== null)]) if (!ids.has(id)) throw new Error(`诊断引用了不存在的区域：${id}`);
+    }
+    const responseSchema = WorkflowStageResponseSchema(schema);
+    return reply.header('cache-control', 'no-store').send(responseSchema.parse({ requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, model: output.result.model, promptVersion: promptVersions[stage === 'route' ? 'router' : stage === 'brief' ? 'brief' : 'reviewer'], payload: output.payload, usage: { ...output.result.usage, durationMs: output.durationMs } }));
+  } catch (error) {
+    request.log.error({ event: 'workflow.stage.failed', summary: '阶段失败', stage, requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, error: errorLogDetails(error) }, `[${stage.toUpperCase()} 失败] 工作流已停止`);
+    return reply.code(502).send({ ...apiError('WORKFLOW_STAGE_FAILED', `${stage} 阶段失败，请查看服务端日志`), requestId: parsed.requestId });
+  }
+});
 app.post('/api/segment-intent', async (request, reply) => {
   if (!sameOrigin(request)) return reply.code(403).send(apiError('ORIGIN_DENIED', '当前来源无法使用服务'));
   const active = getOrCreateSession(request.cookies.pc_session, reply, isSecureRequest(request));
@@ -282,7 +367,7 @@ app.post('/api/plan', async (request, reply) => {
     request.log.error({ event: 'ai.plan.configuration_missing', missing: 'AI_API_KEY' }, 'AI plan request cannot run without credentials');
     return reply.code(503).send(apiError('AI_UNAVAILABLE','AI 服务暂不可用，本地编辑仍可继续'));
   }
-  let parsed; try { parsed=PlanRequestSchema.parse(request.body); jpegSize(parsed.originalPreview.base64); jpegSize(parsed.currentPreview.base64); if (parsed.referencePreview) jpegSize(parsed.referencePreview.base64); } catch (error) {
+  let parsed; try { parsed=PlanRequestSchema.parse(request.body); if (parsed.workflow.capabilityVersion !== CAPABILITY_VERSION) throw new Error('能力版本不匹配'); checkedJpeg(parsed.originalPreview.base64, parsed.originalPreview, 1024 * 1024); checkedJpeg(parsed.currentPreview.base64, parsed.currentPreview, 1024 * 1024); if (parsed.referencePreview) checkedJpeg(parsed.referencePreview.base64, parsed.referencePreview, 1024 * 1024); if (parsed.candidatePreview) checkedJpeg(parsed.candidatePreview.base64, parsed.candidatePreview, 1024 * 1024); } catch (error) {
     request.log.warn({ event: 'ai.plan.request_invalid', error: errorLogDetails(error) }, 'AI plan request rejected');
     return reply.code(400).send(apiError('REQUEST_INVALID','请求内容不符合编辑协议'));
   }
@@ -305,7 +390,7 @@ app.post('/api/plan', async (request, reply) => {
     workflowId: parsed.workflow.workflowId,
     workflowStage: parsed.stage,
     route: parsed.route,
-    promptVersion: promptVersions.planner,
+    promptVersion: promptVersions[parsed.stage],
     capabilityVersion: parsed.workflow.capabilityVersion,
     maskSnapshotId: parsed.workflow.maskSnapshotId,
     provider: config.provider,
@@ -321,28 +406,45 @@ app.post('/api/plan', async (request, reply) => {
   try {
     const stageInput = planStageInput(parsed);
     const plannerInstructions = buildPlannerPrompt({
+      stage: parsed.stage,
       route: parsed.route,
       outputSchema: JSON.stringify(planPayloadJsonSchema),
       stageInput,
+      sceneProfile: parsed.brief?.sceneProfile,
     });
+    const planImages = [
+      { id: 'original', role: 'original', preview: parsed.originalPreview },
+      { id: 'current', role: 'current', preview: parsed.currentPreview },
+      ...(parsed.referencePreview ? [{ id: 'reference', role: 'reference', preview: parsed.referencePreview }] : []),
+      ...(parsed.candidatePreview ? [{ id: 'candidate', role: 'candidate', preview: parsed.candidatePreview }] : []),
+    ];
+    const loggedImages = await imageManifest(planImages);
     const { payload, result, attempts } = await planWithRepair(
       provider,
       {
         instructions: plannerInstructions,
         userText: stageInput,
-        images: [{ base64: parsed.originalPreview.base64 }, { base64: parsed.currentPreview.base64 }, ...(parsed.referencePreview ? [{ base64: parsed.referencePreview.base64 }] : [])],
+        images: planImages.map((image) => ({ id: image.id, role: image.role, base64: image.preview.base64 })),
       },
       {
         state: parsed.state,
         allowComposition: parsed.allowComposition,
         log: request.log,
         requestId: parsed.requestId,
+        workflowId: parsed.workflow.workflowId,
+        stage: parsed.stage,
+        route: parsed.route,
+        promptVersion: promptVersions[parsed.stage],
+        capabilityVersion: parsed.workflow.capabilityVersion,
+        imageManifest: loggedImages,
         deadlineAt: started + PLAN_DEADLINE_MS,
         validatePayload: (payload) => validateWorkflowPlan(parsed, payload),
         buildRepairInstructions: (invalidOutput, error) => buildPlannerPrompt({
+          stage: parsed.stage,
           route: parsed.route,
           outputSchema: JSON.stringify(planPayloadJsonSchema),
           stageInput,
+          sceneProfile: parsed.brief?.sceneProfile,
           invalidOutput,
           errorList: error instanceof Error ? error.message : String(error),
         }),
@@ -350,7 +452,7 @@ app.post('/api/plan', async (request, reply) => {
     );
     const response = PlanResponseSchema.parse({
       requestId: parsed.requestId, workflowId: parsed.workflow.workflowId, imageId: parsed.imageId, baseRevision: parsed.baseRevision,
-      planId: randomUUID(), model: result.model, promptVersion: promptVersions.planner, rendererVersion: RENDERER_VERSION,
+      planId: randomUUID(), model: result.model, promptVersion: promptVersions[parsed.stage], rendererVersion: RENDERER_VERSION,
       payload,
       usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cachedInputTokens: result.usage.cachedInputTokens, attempts, durationMs: Date.now() - started },
     });
@@ -363,7 +465,7 @@ app.post('/api/plan', async (request, reply) => {
       workflowId: parsed.workflow.workflowId,
       workflowStage: parsed.stage,
       route: parsed.route,
-      promptVersion: promptVersions.planner,
+      promptVersion: promptVersions[parsed.stage],
       capabilityVersion: parsed.workflow.capabilityVersion,
       durationMs: Date.now() - started,
       attempts,

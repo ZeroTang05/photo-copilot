@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import * as UTIF from 'utif2';
 import { applyChanges, changedSummary, createInitialState, defaultGlobal, SCHEMA_VERSION, type EditState, type GlobalKey, type PlanPayload, type Region } from '@photo-copilot/domain';
-import type { PlanRequest, SegmentIntent, SegmentResponse } from '@photo-copilot/ai-contract';
+import type { BriefRequest, EditBrief, PlanRequest, ReviewReport, ReviewRequest, RouteDecision, RouteRequest, SegmentIntent, SegmentResponse, WorkflowImage } from '@photo-copilot/ai-contract';
 import { CAPABILITY_VERSION, type WorkflowRoute } from '@photo-copilot/ai-prompts';
 import { PhotoRenderer } from '@photo-copilot/renderer';
 import { activeSlot, useEditor } from '../state/editor';
@@ -655,7 +655,9 @@ export function App() {
       ]);
       const textInstruction = mode === 'auto' ? '自然改善照片，保持现场氛围' : instruction.trim();
       const selectedTargetId = activeRegionId && state.regions.some((region) => region.id === activeRegionId) ? activeRegionId : null;
-      const route = selectWorkflowRoute({ mode, hasReference: Boolean(reference), selectedTargetId: selectedTargetId ?? undefined });
+      let route = selectWorkflowRoute({ mode, hasReference: Boolean(reference), selectedTargetId: selectedTargetId ?? undefined });
+      const workflowDeadline = Date.now() + 240_000;
+      let callCount = 0;
       const payload: PlanRequest = {
         schemaVersion: SCHEMA_VERSION,
         requestId: uid(),
@@ -686,17 +688,100 @@ export function App() {
         ...(reference && referenceBase64 ? { referencePreview: { mime: 'image/jpeg' as const, width: reference.width, height: reference.height, base64: referenceBase64 } } : {}),
         context: [],
       };
-      const response = await fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: signal.signal });
-      const body = await response.json();
-      if (!response.ok) {
-        const requestMarker = typeof body.requestId === 'string' ? `（请求编号：${body.requestId}）` : '';
-        throw new Error(`${body.message ?? '建议请求失败'}${requestMarker}`);
+      const images: WorkflowImage[] = [
+        { id: 'original', role: 'original', preview: payload.originalPreview },
+        { id: 'current', role: 'current', preview: payload.currentPreview },
+        ...(payload.referencePreview ? [{ id: 'reference' as const, role: 'reference' as const, preview: payload.referencePreview }] : []),
+      ];
+      const checkActive = () => {
+        if (signal.signal.aborted) throw new DOMException('操作已取消', 'AbortError');
+        if (workflowSignatureRef.current !== requestSignature) throw new Error('建议已过期');
+        if (Date.now() >= workflowDeadline || callCount > 8) throw new Error('本次工作流已达到时间或调用上限');
+      };
+      const requestStage = async <T,>(stage: 'route' | 'brief' | 'review', stagePayload: RouteRequest | BriefRequest | ReviewRequest): Promise<T> => {
+        checkActive();
+        if (callCount >= 8) throw new Error('本次工作流已达到调用上限');
+        callCount += 1;
+        const label = stage === 'route' ? 'R 路由' : stage === 'brief' ? 'D 诊断' : 'V 检查';
+        setStatus(`${label}：正在分析`);
+        console.info(`[${label} 输入]`, { workflowId: payload.workflow.workflowId, requestId: stagePayload.requestId, route, attempt: callCount, imageRoles: stagePayload.images.map((image) => image.role) });
+        const response = await fetch(`/api/color-workflow/${stage}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(stagePayload), signal: signal.signal });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.message ?? `${label}失败`);
+        checkActive();
+        if (body.workflowId !== payload.workflow.workflowId) throw new Error('工作流身份不一致');
+        console.info(`[${label} 输出]`, { workflowId: body.workflowId, result: body.payload });
+        return body.payload as T;
+      };
+      if (mode === 'followup' && !reference && !selectedTargetId) {
+        const decision = await requestStage<RouteDecision>('route', { requestId: uid(), workflow: payload.workflow, route, attempt: callCount + 1, state, images: [], uiMode: mode });
+        if (decision.status !== 'ready') { setStatus(decision.question ?? '请补充本次调整目标'); return; }
+        route = decision.route;
+        payload.route = route;
       }
-      if (state.imageId !== body.imageId || state.revision !== body.baseRevision || body.workflowId !== payload.workflow.workflowId || workflowSignatureRef.current !== requestSignature) throw new Error('建议已过期');
-      const planPayload = body.payload as PlanPayload;
-      if (planPayload.status !== 'plan') { setStatus(planPayload.message || '本次没有可应用的建议'); return; }
-      setCandidate({ payload: planPayload, planId: body.planId, requestId: body.requestId, baseRevision: body.baseRevision });
-      setStatus('正在预览建议。可应用或放弃');
+      let brief: EditBrief | undefined;
+      const needsBrief = route !== 'quick';
+      if (needsBrief) {
+        brief = await requestStage<EditBrief>('brief', { requestId: uid(), workflow: payload.workflow, route, attempt: callCount + 1, state, images, selection: state.regions.map((region) => ({ id: region.id, label: region.label, shape: region.shape })) });
+        if (brief.status !== 'ready') { setStatus(brief.message); return; }
+        if (brief.segmentQueries.some((query) => query.reuseRegionId === null)) { setStatus('需要先建立目标选区，请使用 AI 局部调整选出对象'); return; }
+        payload.brief = brief;
+      }
+      if (route === 'analyze' && brief) { setStatus(brief.message); return; }
+      const requestPlanning = async (stage: 'planner' | 'corrector', extra?: Pick<PlanRequest, 'review' | 'candidate' | 'candidatePreview'>) => {
+        checkActive();
+        if (callCount >= 8) throw new Error('本次工作流已达到调用上限');
+        callCount += 1;
+        const label = stage === 'planner' ? 'P 规划' : 'C 修正';
+        setStatus(`${label}：正在生成参数`);
+        const planRequest: PlanRequest = { ...payload, requestId: uid(), route, stage, ...(extra ?? {}) };
+        console.info(`[${label} 输入]`, { workflowId: payload.workflow.workflowId, requestId: planRequest.requestId, route, attempt: callCount });
+        const response = await fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(planRequest), signal: signal.signal });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.message ?? `${label}失败`);
+        checkActive();
+        if (body.workflowId !== payload.workflow.workflowId || body.imageId !== state.imageId || body.baseRevision !== state.revision) throw new Error('建议已过期');
+        callCount += Math.max(0, (body.usage?.attempts ?? 1) - 1);
+        console.info(`[${label} 输出]`, { workflowId: body.workflowId, result: body.payload });
+        return body as { payload: PlanPayload; planId: string; requestId: string; baseRevision: number };
+      };
+      let planned = await requestPlanning('planner');
+      if (planned.payload.status !== 'plan' || !planned.payload.changes) { setStatus(planned.payload.message || '本次没有可应用的建议'); return; }
+      const mustReview = route !== 'quick' || planned.payload.changes.globalAssignments.some((item) => Math.abs(item.value - state.global[item.parameter]) > (item.parameter === 'exposureEV' ? 0.5 : 20));
+      if (mustReview) {
+        if (!brief) {
+          brief = await requestStage<EditBrief>('brief', { requestId: uid(), workflow: payload.workflow, route, attempt: callCount + 1, state, images, selection: state.regions.map((region) => ({ id: region.id, label: region.label, shape: region.shape })) });
+          if (brief.status !== 'ready') { setStatus(brief.message); return; }
+          payload.brief = brief;
+        }
+        const renderCandidate = async (plan: PlanPayload): Promise<WorkflowImage> => {
+          if (!plan.changes) throw new Error('候选没有可渲染的参数');
+          setStatus('正在渲染候选效果');
+          const next = applyChanges(state, plan.changes, allowComposition);
+          const canvas = document.createElement('canvas');
+          const renderer = new PhotoRenderer(canvas);
+          try {
+            renderer.loadBitmap(await prepareFullBitmap(currentSlot, next, 'export'));
+            for (const region of next.regions) if (region.shape === 'raster') renderer.setMask(region.maskRef, maskStoreRef.current.get(region.maskRef));
+            renderer.render(next, original.width, original.height);
+            const candidatePreview = await previewFromBlob(await renderer.toBlob(0.85), 1024);
+            return { id: 'candidate', role: 'candidate', preview: { mime: 'image/jpeg', width: candidatePreview.width, height: candidatePreview.height, base64: await toBase64(candidatePreview.blob) } };
+          } finally { renderer.dispose(); }
+        };
+        let candidateImage = await renderCandidate(planned.payload);
+        for (let reviewAttempt = 1; reviewAttempt <= 2; reviewAttempt++) {
+          const report = await requestStage<ReviewReport>('review', { requestId: uid(), workflow: payload.workflow, route, attempt: callCount + 1, state, images: [images[1]!, candidateImage, ...(payload.referencePreview ? [images[2]!] : [])], brief, candidate: planned.payload, reviewAttempt });
+          if (report.verdict === 'pass') break;
+          if (report.verdict === 'uncertain') { setStatus(`${report.summary}，请查看候选效果后决定是否应用`); break; }
+          if (reviewAttempt === 2) { setStatus(report.summary); return; }
+          planned = await requestPlanning('corrector', { review: report, candidate: planned.payload, candidatePreview: candidateImage.preview });
+          if (planned.payload.status !== 'plan' || !planned.payload.changes) { setStatus(planned.payload.message); return; }
+          candidateImage = await renderCandidate(planned.payload);
+        }
+      }
+      checkActive();
+      setCandidate({ payload: planned.payload, planId: planned.planId, requestId: planned.requestId, baseRevision: planned.baseRevision });
+      setStatus('建议已完成，可应用或放弃');
     } catch (error) {
       if ((error as DOMException).name === 'AbortError') setStatus('已取消建议');
       else setStatus(error instanceof Error ? error.message : '建议请求失败');

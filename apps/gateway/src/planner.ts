@@ -13,6 +13,12 @@ interface PlannerOptions {
     error: (payload: Record<string, unknown>, msg: string) => void;
   };
   requestId: string;
+  workflowId: string;
+  stage: 'planner' | 'corrector';
+  route: string;
+  promptVersion: string;
+  capabilityVersion: string;
+  imageManifest: Array<Record<string, unknown>>;
   /** 端到端截止时间，给路由层的响应序列化和日志预留余量。 */
   deadlineAt: number;
   /** 格式修复沿用原始工作流边界，只替换本次模型的系统提示。 */
@@ -68,23 +74,6 @@ const parseResult = (result: ProviderCallResult): PlanPayload => {
   return PlanPayloadSchema.parse(normalizePayload(raw));
 };
 
-/** 未授予构图权限时保留可用的调色建议，并移除 AI 偶发返回的构图字段。 */
-const removeUnauthorizedComposition = (payload: PlanPayload, allowComposition: boolean): PlanPayload => {
-  if (allowComposition || payload.status !== 'plan' || !payload.changes?.transform) return payload;
-  const changes = { ...payload.changes, transform: null };
-  const reasons = payload.reasons.filter((reason) => reason.target !== 'transform');
-  const hasEditableChange = changes.globalAssignments.length > 0 || changes.regionUpserts.length > 0 || changes.regionDeletes.length > 0;
-  if (hasEditableChange) return { ...payload, changes, reasons };
-  return {
-    ...payload,
-    status: 'clarify',
-    message: '当前没有授权 AI 调整构图，因此未生成可应用的调色修改。',
-    changes: null,
-    reasons: [],
-    limitations: [...payload.limitations, '构图调整已忽略。'].slice(0, 3),
-  };
-};
-
 const buildRepairText = (userText: string, previousOutput: string, error: unknown): string =>
   `${userText}\n\n[上次对象]\n${previousOutput}\n[校验错误]\n${errorMessage(error)}`;
 
@@ -107,6 +96,8 @@ export async function planWithRepair(
     try {
       const timeoutMs = Math.min(PROVIDER_TIMEOUT_MS, options.deadlineAt - Date.now());
       if (timeoutMs < 1_000) throw new ProviderError('AI 请求已超出总时限');
+      options.log.info({ event: 'workflow.input', summary: '输入', requestId: options.requestId, workflowId: options.workflowId, stage: options.stage, route: options.route, attempt: attempt + 1, promptVersion: options.promptVersion, capabilityVersion: options.capabilityVersion, images: options.imageManifest, input: callInput.userText }, `[${options.stage.toUpperCase()} 输入] 已整理阶段数据`);
+      options.log.info({ event: 'workflow.request', summary: '发送', requestId: options.requestId, workflowId: options.workflowId, stage: options.stage, route: options.route, attempt: attempt + 1, promptVersion: options.promptVersion, capabilityVersion: options.capabilityVersion, images: options.imageManifest, prompt: callInput.instructions, input: callInput.userText }, `[${options.stage.toUpperCase()} 发送] 正在调用大模型`);
       result = await provider.call(callInput, timeoutMs);
       usage = {
         inputTokens: addUsage(usage.inputTokens, result.usage.inputTokens),
@@ -116,7 +107,12 @@ export async function planWithRepair(
     } catch (err) {
       options.log.error({
         event: 'ai.provider.failed',
+        summary: '模型报错',
         requestId: options.requestId,
+        workflowId: options.workflowId,
+        stage: options.stage,
+        prompt: callInput.instructions,
+        input: callInput.userText,
         provider: provider.name,
         attempt: attempt + 1,
         durationMs: Date.now() - startedAt,
@@ -127,18 +123,22 @@ export async function planWithRepair(
     // 模型输出是调色 JSON，不包含图片数据；完整记录便于重现契约或解析失败。
     options.log.info({
       event: 'ai.provider.response',
+      summary: '原始输出',
       requestId: options.requestId,
+      workflowId: options.workflowId,
+      stage: options.stage,
       provider: provider.name,
       attempt: attempt + 1,
       model: result.model,
       durationMs: Date.now() - startedAt,
       usage: result.usage,
       modelOutput: result.rawText,
-    }, 'AI provider returned a response');
+    }, `[${options.stage.toUpperCase()} 输出] 已收到大模型结果`);
     try {
-      const payload = removeUnauthorizedComposition(parseResult(result), options.allowComposition);
+      const payload = parseResult(result);
       validatePlan(options.state, payload, options.allowComposition);
       options.validatePayload?.(payload);
+      options.log.info({ event: 'workflow.output.validated', summary: '校验通过', requestId: options.requestId, workflowId: options.workflowId, stage: options.stage, attempt: attempt + 1, normalizedOutput: payload }, `[${options.stage.toUpperCase()} 完成] 输出已通过校验`);
       return { payload, result: { ...result, usage }, attempts: attempt + 1 };
     } catch (err) {
       lastError = err;

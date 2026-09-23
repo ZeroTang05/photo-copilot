@@ -1,5 +1,6 @@
 import { EditStateSchema, globalKeys, PlanPayloadSchema, RENDERER_VERSION, SCHEMA_VERSION } from '@photo-copilot/domain';
 import { z } from 'zod';
+export { validateJpegPreview } from './preview-image.js';
 
 export const PreviewSchema = z.object({ mime: z.literal('image/jpeg'), width: z.number().int().positive().max(1024), height: z.number().int().positive().max(1024), base64: z.string().min(1) }).strict();
 export const MaskRefSchema = z.object({ assetId: z.uuid(), version: z.number().int().positive() }).strict();
@@ -80,6 +81,17 @@ const SegmentQuerySchema = z.object({
   textQuery: z.string().trim().min(1).max(80),
   reuseRegionId: z.uuid().nullable(),
 }).strict();
+export const SceneProfileSchema = z.object({
+  subjects: z.array(z.enum(['person', 'landscape', 'architecture', 'food_product', 'animal', 'other'])).min(1).max(2),
+  lighting: z.array(z.enum(['night', 'backlit', 'mixed_light', 'flat_hazy'])).max(2),
+  primarySubject: z.enum(['person', 'landscape', 'architecture', 'food_product', 'animal', 'other']),
+  subjectEvidence: z.string().trim().min(1).max(100),
+  lightingEvidence: z.string().trim().max(100).nullable(),
+  targetIds: z.array(z.uuid()).max(4),
+}).strict().superRefine((value, ctx) => {
+  if (value.subjects[0] !== value.primarySubject) ctx.addIssue({ code: 'custom', message: '首个主体必须是主要主体' });
+  if (value.lighting.length === 0 && value.lightingEvidence !== null) ctx.addIssue({ code: 'custom', message: '没有光线标签时不应提供光线依据' });
+});
 export const EditBriefSchema = z.object({
   status: z.enum(['ready', 'clarify', 'unsupported']),
   goal: z.string().trim().max(160),
@@ -87,6 +99,7 @@ export const EditBriefSchema = z.object({
   preserve: z.array(z.string().trim().min(1).max(120)).max(5),
   priorities: z.array(PrioritySchema).max(3),
   segmentQueries: z.array(SegmentQuerySchema).max(3),
+  sceneProfile: SceneProfileSchema,
   uncertainties: z.array(z.string().trim().min(1).max(120)).max(3),
   message: z.string().trim().min(1).max(200),
 }).strict();
@@ -116,10 +129,47 @@ export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 export type RouteDecision = z.infer<typeof RouteDecisionSchema>;
 export type EditBrief = z.infer<typeof EditBriefSchema>;
 export type ReviewReport = z.infer<typeof ReviewReportSchema>;
+export type SceneProfile = z.infer<typeof SceneProfileSchema>;
+
+/** 阶段请求只携带所需图片；每张图有显式角色，像素留在独立字段。 */
+export const WorkflowImageSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  role: z.enum(['original', 'current', 'reference', 'candidate', 'maskAtlas', 'detailBefore', 'detailAfter']),
+  preview: PreviewSchema,
+}).strict();
+export type WorkflowImage = z.infer<typeof WorkflowImageSchema>;
+const StageBaseSchema = z.object({
+  requestId: z.uuid(),
+  workflow: WorkflowSnapshotSchema,
+  route: WorkflowRouteSchema,
+  attempt: z.number().int().min(1).max(8),
+  state: EditStateSchema,
+  images: z.array(WorkflowImageSchema).max(8),
+}).strict();
+export const RouteRequestSchema = StageBaseSchema.extend({
+  uiMode: z.enum(['auto', 'followup']),
+}).strict();
+export const BriefRequestSchema = StageBaseSchema.extend({
+  selection: z.array(z.object({ id: z.uuid(), label: z.string().max(40), shape: z.enum(['ellipse', 'linear', 'brush', 'raster']) }).strict()).max(4),
+}).strict();
+export const ReviewRequestSchema = StageBaseSchema.extend({
+  brief: EditBriefSchema,
+  candidate: PlanPayloadSchema,
+  reviewAttempt: z.number().int().min(1).max(2),
+}).strict();
+export type RouteRequest = z.infer<typeof RouteRequestSchema>;
+export type BriefRequest = z.infer<typeof BriefRequestSchema>;
+export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+export const WorkflowStageResponseSchema = <T extends z.ZodType>(payload: T) => z.object({
+  requestId: z.uuid(), workflowId: z.uuid(), model: z.string(), promptVersion: z.string(), payload,
+  usage: z.object({ inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), cachedInputTokens: z.number().int().nullable(), durationMs: z.number().int().nonnegative() }).strict(),
+}).strict();
 
 export const PlanRequestSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), requestId: z.uuid(), imageId: z.uuid(), sourceVersion: z.number().int().positive(), baseRevision: z.number().int().nonnegative(), mode: z.enum(['auto', 'followup']),
   workflow: WorkflowSnapshotSchema, stage: z.enum(['planner', 'corrector']), route: WorkflowRouteSchema,
+  brief: EditBriefSchema.optional(), review: ReviewReportSchema.optional(), candidate: PlanPayloadSchema.optional(), candidatePreview: PreviewSchema.optional(),
   instruction: z.string().max(1000), state: EditStateSchema, allowComposition: z.boolean(), originalPreview: PreviewSchema, currentPreview: PreviewSchema, referencePreview: PreviewSchema.optional(),
   context: z.array(z.object({ instruction: z.string().max(250), appliedSummary: z.string().max(250) }).strict()).max(6),
 }).strict().superRefine((request, ctx) => {
@@ -128,6 +178,7 @@ export const PlanRequestSchema = z.object({
   if (request.workflow.imageId !== request.imageId || request.workflow.sourceVersion !== request.sourceVersion || request.workflow.baseRevision !== request.baseRevision || request.workflow.rendererVersion !== request.state.rendererVersion || request.workflow.instruction !== request.instruction) ctx.addIssue({ code: 'custom', message: '工作流快照与规划请求不一致' });
   if (request.workflow.selectedTargetId && !request.state.regions.some((region) => region.id === request.workflow.selectedTargetId)) ctx.addIssue({ code: 'custom', message: '选中区域不在当前编辑状态中' });
   if (request.route === 'local' && !request.workflow.selectedTargetId) ctx.addIssue({ code: 'custom', message: '局部路线需要选中真实区域' });
+  if (request.stage === 'corrector' && (!request.brief || !request.review || !request.candidate || !request.candidatePreview)) ctx.addIssue({ code: 'custom', message: '定向修正需要诊断、候选和检查结果' });
   if (request.originalPreview.width !== request.currentPreview.width || request.originalPreview.height !== request.currentPreview.height) ctx.addIssue({ code: 'custom', message: '两张分析图尺寸必须一致' });
 });
 export type PlanRequest = z.infer<typeof PlanRequestSchema>;

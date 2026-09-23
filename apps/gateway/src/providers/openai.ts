@@ -33,7 +33,7 @@ export class OpenAIResponsesProvider implements Provider {
       response = await this.client.responses.create({
         model: this.cfg.model,
         store: false,
-        max_output_tokens: 6000,
+        max_output_tokens: input.maxOutputTokens ?? 6000,
         instructions: input.instructions,
         input: [{
           role: 'user',
