@@ -1,4 +1,5 @@
 import type { EditState, GlobalKey, Region } from '@photo-copilot/domain';
+import { useState } from 'react';
 import { Slider } from './Slider';
 
 interface ControlsPanelProps {
@@ -16,6 +17,8 @@ interface ControlsPanelProps {
   onActivateRegion: (regionId: string) => void;
   samCandidates: Array<{ candidateId: string; displayLabel: string; areaRatio: number }>;
   onApplySamCandidate: (candidateId: string) => void;
+  onSegment: (objectName: string) => void;
+  segmentationBusy: boolean;
   onUpdateRegion: (region: Region, transient?: boolean) => void;
   onDeleteRegion: (regionId: string) => void;
   activeBrushRegionId?: string;
@@ -87,6 +90,7 @@ function RegionEditor({ region, active, disabled, onActivate, onUpdate, onDelete
 
 export function ControlsPanel(props: ControlsPanelProps) {
   const { state, disabled, regionCount } = props;
+  const [segmentObject, setSegmentObject] = useState('');
   const crop = state?.transform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
   return (
     <aside
@@ -333,6 +337,11 @@ export function ControlsPanel(props: ControlsPanelProps) {
             +
           </button>
         </summary>
+        <div className="sam-region-candidates">
+          <strong>识别物体选区</strong>
+          <label className="select-row"><span>物体名称</span><input value={segmentObject} maxLength={80} placeholder="例如：天空、人物" disabled={!state || disabled || props.segmentationBusy} onChange={(event) => setSegmentObject(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && state && !disabled && !props.segmentationBusy && regionCount < 4 && segmentObject.trim()) props.onSegment(segmentObject.trim()); }} /></label>
+          <button className="region-add-outside" disabled={!state || disabled || props.segmentationBusy || !segmentObject.trim() || regionCount >= 4} onClick={() => props.onSegment(segmentObject.trim())}>{props.segmentationBusy ? '正在识别…' : '生成选区'}</button>
+        </div>
         {props.samCandidates.length > 0 && <div className="sam-region-candidates" aria-label="AI 识别选区">
           <strong>AI 识别选区</strong>
           <p className="region-hint">选择一个选区后，它会加入下方的局部调整，并可用画笔继续修正。</p>

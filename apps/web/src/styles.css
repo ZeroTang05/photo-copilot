@@ -336,6 +336,7 @@ canvas {
 }
 
 .brush-canvas { cursor: crosshair; }
+.canvas-processing { position: absolute; z-index: 3; left: 50%; bottom: 18px; transform: translateX(-50%); padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px; background: #171c20e8; color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; }
 .mask-outline { position: absolute; z-index: 2; pointer-events: none; overflow: visible; }
 .mask-outline-shadow, .mask-outline-line, .mask-outline-guide { fill: none; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
 .mask-outline-shadow { stroke: #111b; stroke-width: 5px; }

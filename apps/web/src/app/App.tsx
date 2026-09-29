@@ -177,6 +177,7 @@ export function App() {
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
   const [isComparing, setIsComparing] = useState(false);
   const [detailPreview, setDetailPreview] = useState<DetailPreview>();
+  const [restorationPending, setRestorationPending] = useState(false);
   const [samCandidates, setSamCandidates] = useState<SamCandidate[]>([]);
   const [pointSegmentationSupported, setPointSegmentationSupported] = useState(false);
   const workflowSignature = useMemo(() => JSON.stringify({
@@ -231,6 +232,7 @@ export function App() {
     if (!hasRestoration(parameters)) return createImageBitmap(slot.blob, { imageOrientation: 'from-image' });
     const generation = ++restorationGenerationRef.current;
     restorationClient.cancel(generation);
+    setRestorationPending(hasRestoration(restorationParameters));
     const result = await restorationClient.prepare({ imageId: editState.imageId, generation, blob: slot.blob, parameters, mode });
     return result.bitmap;
   }, []);
@@ -318,6 +320,7 @@ export function App() {
       renderedImageIdRef.current = undefined;
       canvas.width = 1;
       canvas.height = 1;
+      setRestorationPending(false);
       setActiveBrushRegionId(undefined);
       setActiveRasterPaint(undefined);
       return;
@@ -326,7 +329,7 @@ export function App() {
     let cancelled = false;
     const generation = ++restorationGenerationRef.current;
     restorationClient.cancel(generation);
-    void (async () => {
+    const update = () => void (async () => {
       if (hasRestoration(restorationParameters)) {
         setStatus('正在准备图像处理');
         return restorationClient.prepare({ imageId, generation, blob: currentSlot.blob, parameters: restorationParameters, mode: 'preview' });
@@ -345,11 +348,15 @@ export function App() {
       renderedImageIdRef.current = imageId;
       previous?.dispose();
       draw();
+      setRestorationPending(false);
       if (hasRestoration(restorationParameters)) setStatus('图像处理已更新');
     }).catch((error: unknown) => {
-      if (!cancelled) setStatus(`图像处理失败：${error instanceof Error ? error.message : String(error)}`);
+      if (!cancelled) { setRestorationPending(false); setStatus(`图像处理失败：${error instanceof Error ? error.message : String(error)}`); }
     });
-    return () => { cancelled = true; };
+    // 拖动去雾或降噪滑杆时只处理停下来的值，避免旧请求排队造成画面卡顿。
+    const timer = hasRestoration(restorationParameters) ? window.setTimeout(update, 220) : undefined;
+    if (timer === undefined) update();
+    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
   }, [currentSlot?.blob, currentSlot?.state.imageId, restorationParameters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 删除照片或离开页面时释放对应的去雾分析系数缓存。
@@ -618,7 +625,14 @@ export function App() {
       };
       const [original, processed] = await Promise.all([
         createImageBitmap(currentSlot.blob, { imageOrientation: 'from-image' }).then(cropBitmap),
-        prepareFullBitmap(currentSlot, state, 'detail').then(cropBitmap),
+        prepareFullBitmap(currentSlot, state, 'detail').then(async (bitmap) => {
+          if (!hasRestoration(state.global)) return cropBitmap(bitmap);
+          const canvas = document.createElement('canvas');
+          canvas.width = edge; canvas.height = edge;
+          canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          return canvas.toDataURL('image/png');
+        }),
       ]);
       setDetailPreview({ original, processed });
       setStatus('已显示照片中央的原尺寸细节');
@@ -791,9 +805,9 @@ export function App() {
   };
 
   /** 手动输入一个清晰概念时，直接请求 SAM3，避免为了局部选择额外调用 LLM。 */
-  const requestSamSegmentation = async () => {
+  const requestSamSegmentation = async (objectName?: string) => {
     if (!state || !currentSlot || candidate) return;
-    const instructionText = instruction.trim();
+    const instructionText = (objectName ?? instruction).trim();
     if (!instructionText) { setStatus('请输入想调整的对象，例如“提亮人物”或“sky”'); return; }
     try {
       controllerRef.current?.abort();
@@ -1006,6 +1020,7 @@ export function App() {
               onPointerUp={finishBrushStroke}
               onPointerCancel={finishBrushStroke}
             />
+            {restorationPending && <div className="canvas-processing" role="status">正在处理照片，预览会自动更新</div>}
             {state && activeRegion && <MaskOutline state={state} region={activeRegion} regionIndex={state.regions.findIndex((region) => region.id === activeRegion.id)} rasterBounds={activeRasterBounds} box={canvasBounds} />}
           </div>
           {bottomPanelOpen && <CopilotPanel
@@ -1045,6 +1060,8 @@ export function App() {
           activeRegionId={activeRegionId}
           onActivateRegion={setActiveRegionId}
           samCandidates={samCandidates}
+          onSegment={(objectName) => void requestSamSegmentation(objectName)}
+          segmentationBusy={busy}
           onApplySamCandidate={(candidateId) => {
             const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);
             if (item) applySamCandidate(item);

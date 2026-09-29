@@ -26,7 +26,7 @@ function finite(values: Float32Array) {
   for (const value of values) if (!Number.isFinite(value)) throw new Error('图像处理失败：算法产生了无效像素');
 }
 
-async function analysisFor(cv: any, imageId: string, source: OffscreenCanvas) {
+async function analysisFor(cv: any, imageId: string, source: ImageBitmap) {
   const cached = analyses.get(imageId);
   if (cached) return cached;
   const size = scaledSize(source.width, source.height, ANALYSIS_MAX_EDGE);
@@ -44,17 +44,26 @@ async function restore(message: PrepareMessage) {
   if (cancelled(message.generation)) return;
   const bitmap = await createImageBitmap(message.blob, { imageOrientation: 'from-image' });
   try {
-    const size = message.mode === 'preview' ? scaledSize(bitmap.width, bitmap.height, PREVIEW_MAX_EDGE) : { width: bitmap.width, height: bitmap.height };
+    const detailEdge = Math.min(512, bitmap.width, bitmap.height);
+    const detailLeft = Math.floor((bitmap.width - detailEdge) / 2);
+    const detailTop = Math.floor((bitmap.height - detailEdge) / 2);
+    const size = message.mode === 'preview' ? scaledSize(bitmap.width, bitmap.height, PREVIEW_MAX_EDGE)
+      : message.mode === 'detail' ? { width: detailEdge, height: detailEdge } : { width: bitmap.width, height: bitmap.height };
     // 去雾系数始终从完整原图缩到 1024 计算。预览大小不会改变空气光估计。
-    const fullSource = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const fullContext = fullSource.getContext('2d', { colorSpace: 'srgb' });
-    if (!fullContext) throw new Error('图像处理失败：无法读取原图');
-    fullContext.drawImage(bitmap, 0, 0);
-    const source = new OffscreenCanvas(size.width, size.height);
+    // 局部检查保留真实邻域，滤波边缘与完整导出使用相同的相邻像素。
+    const sourceLeft = message.mode === 'detail' ? Math.max(0, detailLeft - FILTER_RADIUS) : 0;
+    const sourceTop = message.mode === 'detail' ? Math.max(0, detailTop - FILTER_RADIUS) : 0;
+    const sourceWidth = message.mode === 'detail' ? Math.min(bitmap.width, detailLeft + detailEdge + FILTER_RADIUS) - sourceLeft : size.width;
+    const sourceHeight = message.mode === 'detail' ? Math.min(bitmap.height, detailTop + detailEdge + FILTER_RADIUS) - sourceTop : size.height;
+    const offsetX = message.mode === 'detail' ? detailLeft - sourceLeft : 0;
+    const offsetY = message.mode === 'detail' ? detailTop - sourceTop : 0;
+    const source = new OffscreenCanvas(sourceWidth, sourceHeight);
     const sourceContext = source.getContext('2d', { colorSpace: 'srgb' });
     if (!sourceContext) throw new Error('图像处理失败：无法读取原图');
-    sourceContext.drawImage(fullSource, 0, 0, size.width, size.height);
-    const analysis = message.parameters.dehaze > 0 ? await analysisFor(cv, message.imageId, fullSource) : undefined;
+    // 直接从解码图生成预览；降噪时无需先复制一张完整尺寸的 RGBA 画布。
+    if (message.mode === 'detail') sourceContext.drawImage(bitmap, sourceLeft, sourceTop, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+    else sourceContext.drawImage(bitmap, 0, 0, size.width, size.height);
+    const analysis = message.parameters.dehaze > 0 ? await analysisFor(cv, message.imageId, bitmap) : undefined;
     if (cancelled(message.generation)) return;
 
     const output = new OffscreenCanvas(size.width, size.height);
@@ -62,15 +71,18 @@ async function restore(message: PrepareMessage) {
     if (!outputContext) throw new Error('图像处理失败：无法创建输出画布');
     for (let top = 0; top < size.height; top += TILE_SIZE) for (let left = 0; left < size.width; left += TILE_SIZE) {
       const width = Math.min(TILE_SIZE, size.width - left), height = Math.min(TILE_SIZE, size.height - top);
-      const readLeft = Math.max(0, left - FILTER_RADIUS), readTop = Math.max(0, top - FILTER_RADIUS);
-      const readRight = Math.min(size.width, left + width + FILTER_RADIUS), readBottom = Math.min(size.height, top + height + FILTER_RADIUS);
+      const readLeft = Math.max(0, left + offsetX - FILTER_RADIUS), readTop = Math.max(0, top + offsetY - FILTER_RADIUS);
+      const readRight = Math.min(sourceWidth, left + offsetX + width + FILTER_RADIUS), readBottom = Math.min(sourceHeight, top + offsetY + height + FILTER_RADIUS);
       const readWidth = readRight - readLeft, readHeight = readBottom - readTop;
       const raw = sourceContext.getImageData(readLeft, readTop, readWidth, readHeight);
       const processed = denoiseTile(cv, raw.data, readWidth, readHeight, message.parameters);
       finite(processed);
-      const centerX = left - readLeft, centerY = top - readTop;
+      const centerX = left + offsetX - readLeft, centerY = top + offsetY - readTop;
       const pixels = analysis
-        ? reconstructDehaze(raw.data, processed, readWidth, centerX, centerY, width, height, left, top, size.width, size.height, analysis, message.parameters.dehaze / 100)
+        ? reconstructDehaze(raw.data, processed, readWidth, centerX, centerY, width, height,
+          left + (message.mode === 'detail' ? detailLeft : 0), top + (message.mode === 'detail' ? detailTop : 0),
+          message.mode === 'detail' ? bitmap.width : size.width, message.mode === 'detail' ? bitmap.height : size.height,
+          analysis, message.parameters.dehaze / 100)
         : (() => {
           const result = new Uint8ClampedArray(width * height * 4);
           for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {

@@ -13,7 +13,7 @@ export class RestorationClient {
 
   private ensureWorker() {
     if (this.worker) return this.worker;
-    const worker = new Worker(restorationWorkerUrl, { type: 'classic', name: 'photo-restoration' });
+    const worker = new Worker(restorationWorkerUrl, { type: 'module', name: 'photo-restoration' });
     worker.onmessage = (event: MessageEvent<any>) => {
       const message = event.data;
       const pending = this.pending.get(message.generation);
