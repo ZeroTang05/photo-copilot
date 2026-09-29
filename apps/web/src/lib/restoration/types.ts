@@ -26,6 +26,7 @@ export interface DehazeAnalysis {
   airlight: readonly [number, number, number];
   meanA: Float32Array;
   meanB: Float32Array;
+  skyProtection: Float32Array;
 }
 
 export const hasRestoration = (parameters: RestorationParameters) => parameters.dehaze > 0 || parameters.denoiseLuma > 0 || parameters.denoiseChroma > 0;

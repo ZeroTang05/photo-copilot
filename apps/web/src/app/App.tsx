@@ -232,7 +232,6 @@ export function App() {
     if (!hasRestoration(parameters)) return createImageBitmap(slot.blob, { imageOrientation: 'from-image' });
     const generation = ++restorationGenerationRef.current;
     restorationClient.cancel(generation);
-    setRestorationPending(hasRestoration(restorationParameters));
     const result = await restorationClient.prepare({ imageId: editState.imageId, generation, blob: slot.blob, parameters, mode });
     return result.bitmap;
   }, []);
@@ -329,6 +328,7 @@ export function App() {
     let cancelled = false;
     const generation = ++restorationGenerationRef.current;
     restorationClient.cancel(generation);
+    setRestorationPending(hasRestoration(restorationParameters));
     const update = () => void (async () => {
       if (hasRestoration(restorationParameters)) {
         setStatus('正在准备图像处理');
@@ -610,7 +610,7 @@ export function App() {
 
   /** 在照片中央截取 512 像素区域，一像素对应一像素，方便判断噪点与纹理。 */
   const handleShowDetail = async () => {
-    if (!state || !currentSlot || candidate) return;
+    if (!state || !currentSlot || candidate || restorationPending) return;
     try {
       setStatus('正在处理原尺寸细节');
       const edge = Math.min(512, state.sourceWidth, state.sourceHeight);
@@ -1062,6 +1062,7 @@ export function App() {
           samCandidates={samCandidates}
           onSegment={(objectName) => void requestSamSegmentation(objectName)}
           segmentationBusy={busy}
+          restorationPending={restorationPending}
           onApplySamCandidate={(candidateId) => {
             const item = samCandidates.find((candidateItem) => candidateItem.candidateId === candidateId);
             if (item) applySamCandidate(item);

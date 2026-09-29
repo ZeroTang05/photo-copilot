@@ -107,12 +107,15 @@ export function analyzeDehaze(cv: OpenCv, rgba: Uint8ClampedArray, width: number
   const meanGuideTransmission = boxMean(cv, width, height, guideTransmission, window);
   const a = new Float32Array(pixels);
   const b = new Float32Array(pixels);
+  const skyProtection = new Float32Array(pixels);
   for (let index = 0; index < pixels; index += 1) {
     const variance = Math.max(at(meanGuideSquared, index) - at(meanGuide, index) * at(meanGuide, index), 0);
     a[index] = (at(meanGuideTransmission, index) - at(meanGuide, index) * at(meanTransmission, index)) / (variance + DEHAZE_GUIDE_EPSILON);
     b[index] = at(meanTransmission, index) - at(a, index) * at(meanGuide, index);
+    // 去雾会把高亮天空里微弱的颜色差异放大；按亮度平滑保护云层和高光。
+    skyProtection[index] = clamp((at(meanGuide, index) - .25) / .25);
   }
-  return { width, height, airlight, meanA: boxMean(cv, width, height, a, window), meanB: boxMean(cv, width, height, b, window) };
+  return { width, height, airlight, meanA: boxMean(cv, width, height, a, window), meanB: boxMean(cv, width, height, b, window), skyProtection };
 }
 
 function bilinear(values: Float32Array, width: number, height: number, x: number, y: number) {
@@ -141,12 +144,13 @@ export function reconstructDehaze(
       * luminance(linear(at(original, sourceIndex) / 255), linear(at(original, sourceIndex + 1) / 255), linear(at(original, sourceIndex + 2) / 255))
       + bilinear(analysis.meanB, analysis.width, analysis.height, analysisX, analysisY));
     const safeTransmission = Math.max(transmission, DEHAZE_MIN_TRANSMISSION);
+    const localStrength = strength * (1 - bilinear(analysis.skyProtection, analysis.width, analysis.height, analysisX, analysisY));
     const target = (y * centerWidth + x) * 4;
     for (let channel = 0; channel < 3; channel += 1) {
       const input = linear(at(processedSrgb, rgbIndex + channel));
       const airlight = at(analysis.airlight, channel);
       const candidate = (input - airlight) / safeTransmission + airlight;
-      output[target + channel] = Math.round(srgb(input + strength * (candidate - input)) * 255);
+      output[target + channel] = Math.round(srgb(input + localStrength * (candidate - input)) * 255);
     }
     output[target + 3] = 255;
   }

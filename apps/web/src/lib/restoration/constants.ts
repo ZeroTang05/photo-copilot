@@ -1,5 +1,5 @@
 /** 图像修复算法的固定常量。调参时需以真实照片重新验证。 */
-export const RESTORATION_ALGORITHM_VERSION = 'restoration-2';
+export const RESTORATION_ALGORITHM_VERSION = 'restoration-3';
 export const PREVIEW_MAX_EDGE = 2048;
 export const ANALYSIS_MAX_EDGE = 1024;
 export const TILE_SIZE = 512;
@@ -12,5 +12,5 @@ export const DEHAZE_DARK_CHANNEL_SIZE = 15;
 export const DEHAZE_GUIDE_RADIUS = 16;
 export const DEHAZE_GUIDE_EPSILON = 0.001;
 export const DEHAZE_OMEGA = 0.95;
-export const DEHAZE_MIN_TRANSMISSION = 0.15;
+export const DEHAZE_MIN_TRANSMISSION = 0.35;
 export const DEHAZE_AIRLIGHT_FLOOR = 0.001;

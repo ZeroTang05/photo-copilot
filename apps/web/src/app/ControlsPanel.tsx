@@ -19,6 +19,7 @@ interface ControlsPanelProps {
   onApplySamCandidate: (candidateId: string) => void;
   onSegment: (objectName: string) => void;
   segmentationBusy: boolean;
+  restorationPending: boolean;
   onUpdateRegion: (region: Region, transient?: boolean) => void;
   onDeleteRegion: (regionId: string) => void;
   activeBrushRegionId?: string;
@@ -318,7 +319,7 @@ export function ControlsPanel(props: ControlsPanelProps) {
           onChange={(value, transient) => props.onGlobalChange('denoiseChroma', value, transient)}
         />
         <p className="region-hint">减少暗部的红绿蓝杂点，亮度细节保持独立控制。</p>
-        <button className="region-add-outside" disabled={!state || disabled} onClick={props.onShowDetail}>查看原尺寸细节</button>
+        <button className="region-add-outside" disabled={!state || disabled || props.restorationPending} onClick={props.onShowDetail}>查看原尺寸细节</button>
       </details>
 
       {/* 局部调整 */}
