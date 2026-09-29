@@ -1081,10 +1081,9 @@ export function App() {
       {isDraggingFiles && <div className="drop-overlay" aria-live="polite">松开即可导入照片</div>}
       {detailPreview && <div className="modal detail-modal" role="dialog" aria-modal="true" aria-label="原尺寸细节对比" onClick={() => setDetailPreview(undefined)}>
         <div onClick={(event) => event.stopPropagation()}>
-          <h2>原尺寸细节</h2>
+          <div className="detail-modal-header"><h2>原尺寸细节</h2><button onClick={() => setDetailPreview(undefined)}>关闭</button></div>
           <p>照片中央区域。左侧为原图，右侧为当前处理效果。</p>
           <div className="detail-images"><figure><img src={detailPreview.original} alt="原图中央细节" /><figcaption>原图</figcaption></figure><figure><img src={detailPreview.processed} alt="处理后中央细节" /><figcaption>处理后</figcaption></figure></div>
-          <button onClick={() => setDetailPreview(undefined)}>关闭</button>
         </div>
       </div>}
     </main>
