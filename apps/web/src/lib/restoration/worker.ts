@@ -26,6 +26,18 @@ function finite(values: Float32Array) {
   for (const value of values) if (!Number.isFinite(value)) throw new Error('图像处理失败：算法产生了无效像素');
 }
 
+/** 仅去雾时把 RGBA 字节转换为算法需要的 RGB 浮点值。 */
+function rgbFromRgba(rgba: Uint8ClampedArray) {
+  const rgb = new Float32Array((rgba.length / 4) * 3);
+  for (let pixel = 0; pixel < rgba.length / 4; pixel += 1) {
+    const sourceIndex = pixel * 4, targetIndex = pixel * 3;
+    rgb[targetIndex] = rgba[sourceIndex]! / 255;
+    rgb[targetIndex + 1] = rgba[sourceIndex + 1]! / 255;
+    rgb[targetIndex + 2] = rgba[sourceIndex + 2]! / 255;
+  }
+  return rgb;
+}
+
 async function analysisFor(cv: any, imageId: string, source: ImageBitmap) {
   const cached = analyses.get(imageId);
   if (cached) return cached;
@@ -75,7 +87,10 @@ async function restore(message: PrepareMessage) {
       const readRight = Math.min(sourceWidth, left + offsetX + width + FILTER_RADIUS), readBottom = Math.min(sourceHeight, top + offsetY + height + FILTER_RADIUS);
       const readWidth = readRight - readLeft, readHeight = readBottom - readTop;
       const raw = sourceContext.getImageData(readLeft, readTop, readWidth, readHeight);
-      const processed = denoiseTile(cv, raw.data, readWidth, readHeight, message.parameters);
+      // 仅去雾时直接转换像素，省去每块图像的 OpenCV 矩阵和颜色空间往返转换。
+      const processed = message.parameters.denoiseLuma > 0 || message.parameters.denoiseChroma > 0
+        ? denoiseTile(cv, raw.data, readWidth, readHeight, message.parameters)
+        : rgbFromRgba(raw.data);
       finite(processed);
       const centerX = left + offsetX - readLeft, centerY = top + offsetY - readTop;
       const pixels = analysis

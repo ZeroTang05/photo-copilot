@@ -1,6 +1,7 @@
 /** 图像修复算法的固定常量。调参时需以真实照片重新验证。 */
 export const RESTORATION_ALGORITHM_VERSION = 'restoration-3';
-export const PREVIEW_MAX_EDGE = 2048;
+// 整图预览只需覆盖屏幕显示；原尺寸细节检查和导出仍使用原图像素。
+export const PREVIEW_MAX_EDGE = 1280;
 export const ANALYSIS_MAX_EDGE = 1024;
 export const TILE_SIZE = 512;
 export const FILTER_RADIUS = 2;
